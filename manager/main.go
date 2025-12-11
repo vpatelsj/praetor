@@ -17,6 +17,11 @@ type DesiredState struct {
 	Command []string `json:"command"`
 }
 
+// Selector defines label matching for targeting desired state.
+type Selector struct {
+	MatchLabels map[string]string `json:"matchLabels"`
+}
+
 type DeviceType string
 
 const (
@@ -79,6 +84,7 @@ type registeredDeviceView struct {
 	RegisteredAt time.Time         `json:"registeredAt"`
 	LastSeen     time.Time         `json:"lastSeen"`
 	Online       bool              `json:"online"`
+	Selected     bool              `json:"selected"`
 }
 
 // DeviceStatus is reported by agents after executing the desired command.
@@ -98,6 +104,12 @@ type deviceStatusView struct {
 	Labels       map[string]string `json:"labels"`
 	Capabilities []string          `json:"capabilities"`
 	Online       bool              `json:"online"`
+	Selected     bool              `json:"selected"`
+}
+
+type rolloutRequest struct {
+	Desired  DesiredState `json:"desired"`
+	Selector Selector     `json:"selector"`
 }
 
 // Server holds shared state guarded by a mutex to be safe for concurrent access.
@@ -106,6 +118,10 @@ type Server struct {
 	desired           DesiredState
 	registeredDevices map[string]RegisteredDevice
 	deviceStatuses    map[string]DeviceStatus
+}
+
+var activeSelector = Selector{
+	MatchLabels: map[string]string{},
 }
 
 func main() {
@@ -120,7 +136,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/desired/", srv.handleDesired) // GET /desired/<deviceId>
-	mux.HandleFunc("/updateDesired", srv.handleUpdateDesired)
+	mux.HandleFunc("/rollout", srv.handleRollout)
 	mux.HandleFunc("/register", srv.handleRegister)
 	mux.HandleFunc("/heartbeat", srv.handleHeartbeat)
 	mux.HandleFunc("/devices/registered", srv.handleRegisteredDevices)
@@ -144,50 +160,89 @@ func (s *Server) handleDesired(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
 	s.mu.Lock()
 	desired := s.desired
+	device, ok := s.registeredDevices[deviceID]
 	s.mu.Unlock()
 
+	if !ok {
+		http.Error(w, "device not registered", http.StatusNotFound)
+		return
+	}
+
+	if !deviceMatchesSelector(device, activeSelector) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(desired); err != nil {
 		http.Error(w, "failed to encode state", http.StatusInternalServerError)
 		return
 	}
 }
 
-func (s *Server) handleUpdateDesired(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	defer r.Body.Close()
 
-	var desired DesiredState
-	if err := json.NewDecoder(r.Body).Decode(&desired); err != nil {
+	var req rolloutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if desired.Version == "" {
-		http.Error(w, "version is required", http.StatusBadRequest)
+
+	if req.Desired.Version == "" {
+		http.Error(w, "desired.version is required", http.StatusBadRequest)
 		return
 	}
-	if len(desired.Command) == 0 {
-		http.Error(w, "command is required", http.StatusBadRequest)
+	if len(req.Desired.Command) == 0 {
+		http.Error(w, "desired.command is required", http.StatusBadRequest)
 		return
+	}
+	if req.Selector.MatchLabels == nil {
+		req.Selector.MatchLabels = map[string]string{}
 	}
 
 	s.mu.Lock()
-	s.desired = desired
+	s.desired = req.Desired
+	activeSelector = req.Selector
 	s.mu.Unlock()
 
-	log.Printf("desired state updated to version=%s command=%v", desired.Version, desired.Command)
+	log.Printf("[ROLLOUT] desired=%s selector=%+v", req.Desired.Version, req.Selector.MatchLabels)
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(desired); err != nil {
-		http.Error(w, "failed to encode state", http.StatusInternalServerError)
+	if err := json.NewEncoder(w).Encode(req); err != nil {
+		http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) handleUpdateSelector(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var sel Selector
+	if err := json.NewDecoder(r.Body).Decode(&sel); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if sel.MatchLabels == nil {
+		sel.MatchLabels = map[string]string{}
+	}
+
+	s.mu.Lock()
+	activeSelector = sel
+	s.mu.Unlock()
+
+	log.Printf("[SELECTOR] updated to %+v", sel.MatchLabels)
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -312,6 +367,7 @@ func (s *Server) handleRegisteredDevices(w http.ResponseWriter, r *http.Request)
 			RegisteredAt: d.RegisteredAt,
 			LastSeen:     d.LastSeen,
 			Online:       isOnline(d.LastSeen),
+			Selected:     deviceMatchesSelector(d, activeSelector),
 		})
 	}
 	s.mu.Unlock()
@@ -346,6 +402,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 			Labels:       reg.Labels,
 			Capabilities: reg.Capabilities,
 			Online:       isOnline(lastSeen),
+			Selected:     ok && deviceMatchesSelector(reg, activeSelector),
 		})
 	}
 	s.mu.Unlock()
@@ -409,4 +466,16 @@ func isValidDeviceType(dt DeviceType) bool {
 
 func isCapabilityAllowed(dt DeviceType, cap string) bool {
 	return allowedCapabilities[dt][cap]
+}
+
+func deviceMatchesSelector(device RegisteredDevice, sel Selector) bool {
+	if len(sel.MatchLabels) == 0 {
+		return true
+	}
+	for k, v := range sel.MatchLabels {
+		if device.Labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
