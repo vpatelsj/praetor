@@ -1,0 +1,5 @@
+# Build outputs
+agent/agent
+agent/main
+manager/manager
+manager/main

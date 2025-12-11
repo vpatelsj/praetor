@@ -12,6 +12,14 @@ Small Go-based device-management simulation with a manager and three agents runn
 docker compose up --build
 ```
 
+## Development
+- Each service is its own Go module (`agent/go.mod`, `manager/go.mod`) tied together with the workspace file `go.work`.
+- Run tests per module, e.g.:
+  ```sh
+  go test ./agent/...
+  go test ./manager/...
+  ```
+
 ## Manager HTTP API
 - `POST /register` — agent registration with `deviceId`, `agentVersion`, `deviceType` (idempotent; updates `lastSeen`).
 - `GET /desired/<deviceId>` — fetches the current global desired state (per-device path, but single global payload).
