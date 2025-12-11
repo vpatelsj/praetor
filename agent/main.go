@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	desiredURL   = "http://manager:8080/desired"
-	statusURL    = "http://manager:8080/status"
-	pollInterval = 2 * time.Second
+	desiredBaseURL = "http://manager:8080/desired"
+	registerURL    = "http://manager:8080/register"
+	statusURL      = "http://manager:8080/status"
+	pollInterval   = 2 * time.Second
 )
 
 type desiredState struct {
@@ -39,6 +40,8 @@ func main() {
 	if deviceID == "" {
 		log.Fatal("DEVICE_ID is required")
 	}
+	agentVersion := getenvDefault("AGENT_VERSION", "1.0.0")
+	deviceType := getenvDefault("DEVICE_TYPE", "simulated")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -49,7 +52,11 @@ func main() {
 	defer ticker.Stop()
 
 	currentVersion := ""
-	log.Printf("agent %s starting; polling manager at %s", deviceID, desiredURL)
+	log.Printf("agent %s starting; registering with manager", deviceID)
+	if err := registerWithManager(ctx, client, deviceID, agentVersion, deviceType); err != nil {
+		log.Fatalf("failed to register: %v", err)
+	}
+	log.Printf("agent %s registered; polling manager at %s/<deviceId>", deviceID, desiredBaseURL)
 
 	for {
 		select {
@@ -57,7 +64,7 @@ func main() {
 			log.Printf("agent %s shutting down", deviceID)
 			return
 		case <-ticker.C:
-			desired, err := fetchDesired(ctx, client)
+			desired, err := fetchDesired(ctx, client, deviceID)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					log.Printf("poll canceled: %v", err)
@@ -94,11 +101,12 @@ func main() {
 	}
 }
 
-func fetchDesired(ctx context.Context, client *http.Client) (desiredState, error) {
+func fetchDesired(ctx context.Context, client *http.Client, deviceID string) (desiredState, error) {
 	var ds desiredState
+	url := fmt.Sprintf("%s/%s", desiredBaseURL, deviceID)
 
 	for attempt := 1; attempt <= 3; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, desiredURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return ds, err
 		}
@@ -217,4 +225,57 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+func registerWithManager(ctx context.Context, client *http.Client, deviceID, agentVersion, deviceType string) error {
+	payload, err := json.Marshal(map[string]string{
+		"deviceId":     deviceID,
+		"agentVersion": agentVersion,
+		"deviceType":   deviceType,
+	})
+	if err != nil {
+		return err
+	}
+
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, registerURL, bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err == nil && resp != nil {
+			resp.Body.Close()
+		}
+
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		backoff := time.Duration(1<<attempt) * 500 * time.Millisecond
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+		if err != nil {
+			log.Printf("registration failed (attempt %d): %v; retrying in %s", attempt+1, err, backoff)
+		} else {
+			log.Printf("registration returned %s (attempt %d); retrying in %s", resp.Status, attempt+1, backoff)
+		}
+
+		if sleepWithContext(ctx, backoff) != nil {
+			return ctx.Err()
+		}
+	}
+}
+
+func getenvDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
