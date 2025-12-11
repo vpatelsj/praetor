@@ -12,15 +12,28 @@ Small Go-based device-management simulation with a manager and three agents runn
 docker compose up --build
 ```
 
+## Manager HTTP API
+- `POST /register` — agent registration with `deviceId`, `agentVersion`, `deviceType` (idempotent; updates `lastSeen`).
+- `GET /desired/<deviceId>` — fetches the current global desired state (per-device path, but single global payload).
+- `POST /updateDesired` — update global desired state: `{"version":"vX","command":[...args...]}`.
+- `POST /status` — agent posts execution status: `deviceId`, `version`, `state`, `message`.
+- `GET /devices/registered` — list registered devices with metadata and timestamps.
+- `GET /devices` — list latest statuses posted by agents.
+
+## Agent behavior
+- On start, registers via `/register` with its `DEVICE_ID`, `AGENT_VERSION` (default `1.0.0`), and `DEVICE_TYPE` (default `simulated`).
+- Polls `/desired/<DEVICE_ID>` every 2s; if `version` changes, executes `command` and posts `/status`.
+- Retries registration, desired fetch, and status posts with backoff.
+
 ## Update desired state at runtime
 ```sh
-curl -X POST http://localhost:8080/desired \
+curl -X POST http://localhost:8080/updateDesired \
   -H "Content-Type: application/json" \
   -d '{"version":"v2","command":["echo","Hello from Praetor v2"]}'
 ```
-Check current state:
+Check current desired for a device:
 ```sh
-curl http://localhost:8080/desired
+curl http://localhost:8080/desired/device1
 ```
 
 ## Observing logs
