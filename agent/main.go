@@ -46,7 +46,7 @@ func main() {
 	deviceType := getenvDefault("DEVICE_TYPE", "Simulator")
 	labels := map[string]string{
 		"rack": "demo",
-		"role": strings.ToLower(deviceType),
+		"role": defaultRole(deviceType),
 	}
 	capabilities := defaultCapabilities(deviceType)
 
@@ -73,7 +73,7 @@ func main() {
 			log.Printf("agent %s shutting down", deviceID)
 			return
 		case <-ticker.C:
-			desired, err := fetchDesired(ctx, client, deviceID)
+			desired, targeted, err := fetchDesired(ctx, client, deviceID)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					log.Printf("poll canceled: %v", err)
@@ -82,9 +82,12 @@ func main() {
 				log.Printf("failed to fetch desired state: %v", err)
 				continue
 			}
+			if !targeted {
+				continue
+			}
 
 			if desired.Version == "" {
-				log.Printf("desired state missing version; skipping")
+				// No version in response; treat as empty desired and continue.
 				continue
 			}
 
@@ -110,54 +113,63 @@ func main() {
 	}
 }
 
-func fetchDesired(ctx context.Context, client *http.Client, deviceID string) (desiredState, error) {
-	var ds desiredState
+func fetchDesired(ctx context.Context, client *http.Client, deviceID string) (desiredState, bool, error) {
+	ds := desiredState{}
 	url := fmt.Sprintf("%s/%s", desiredBaseURL, deviceID)
 
 	for attempt := 1; attempt <= 3; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return ds, err
+			return ds, false, err
 		}
 
 		resp, err := client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ds, ctx.Err()
+				return ds, false, ctx.Err()
 			}
 			backoff := time.Duration(attempt) * 300 * time.Millisecond
 			log.Printf("manager unreachable (attempt %d): %v; retrying in %s", attempt, err, backoff)
 			if sleepWithContext(ctx, backoff) != nil {
-				return ds, ctx.Err()
+				return ds, false, ctx.Err()
 			}
 			continue
 		}
 
 		func() {
 			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
+			switch resp.StatusCode {
+			case http.StatusOK:
+				err = json.NewDecoder(resp.Body).Decode(&ds)
+			case http.StatusNoContent:
+				// Not targeted by current selector; treat as no desired update.
+				err = nil
+				ds = desiredState{}
+			default:
 				err = fmt.Errorf("unexpected status: %s", resp.Status)
-				return
 			}
-			err = json.NewDecoder(resp.Body).Decode(&ds)
 		}()
 
 		if err != nil {
 			if ctx.Err() != nil {
-				return ds, ctx.Err()
+				return ds, false, ctx.Err()
 			}
 			backoff := time.Duration(attempt) * 300 * time.Millisecond
 			log.Printf("failed to decode desired state (attempt %d): %v; retrying in %s", attempt, err, backoff)
 			if sleepWithContext(ctx, backoff) != nil {
-				return ds, ctx.Err()
+				return ds, false, ctx.Err()
 			}
 			continue
 		}
 
-		return ds, nil
+		if resp.StatusCode == http.StatusNoContent {
+			return ds, false, nil
+		}
+
+		return ds, true, nil
 	}
 
-	return ds, fmt.Errorf("unable to fetch desired state after retries")
+	return ds, false, fmt.Errorf("unable to fetch desired state after retries")
 }
 
 func executeCommand(ctx context.Context, cmdParts []string) (string, string) {
@@ -346,5 +358,24 @@ func defaultCapabilities(deviceType string) []string {
 		return []string{"systemd", "raw-binary"}
 	default:
 		return []string{"systemd", "raw-binary"}
+	}
+}
+
+func defaultRole(deviceType string) string {
+	switch deviceType {
+	case "Simulator":
+		return "sim"
+	case "NetworkSwitch":
+		return "switch"
+	case "Server":
+		return "server"
+	case "DPU":
+		return "dpu"
+	case "SOC":
+		return "soc"
+	case "BMC":
+		return "bmc"
+	default:
+		return strings.ToLower(deviceType)
 	}
 }
