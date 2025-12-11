@@ -17,22 +17,68 @@ type DesiredState struct {
 	Command []string `json:"command"`
 }
 
+type DeviceType string
+
+const (
+	DeviceTypeServer        DeviceType = "Server"
+	DeviceTypeNetworkSwitch DeviceType = "NetworkSwitch"
+	DeviceTypeDPU           DeviceType = "DPU"
+	DeviceTypeSOC           DeviceType = "SOC"
+	DeviceTypeBMC           DeviceType = "BMC"
+	DeviceTypeSimulator     DeviceType = "Simulator"
+)
+
+var allowedCapabilities = map[DeviceType]map[string]bool{
+	DeviceTypeServer: {
+		"systemd":    true,
+		"container":  true,
+		"raw-binary": true,
+	},
+	DeviceTypeNetworkSwitch: {
+		"systemd":    true,
+		"raw-binary": true,
+	},
+	DeviceTypeDPU: {
+		"systemd":    true,
+		"container":  true,
+		"raw-binary": true,
+	},
+	DeviceTypeSOC: {
+		"systemd":    true,
+		"raw-binary": true,
+	},
+	DeviceTypeBMC: {
+		"initd":      true,
+		"raw-binary": true,
+	},
+	DeviceTypeSimulator: {
+		"systemd":    true,
+		"container":  true,
+		"raw-binary": true,
+		"initd":      true,
+	},
+}
+
 // RegisteredDevice captures information about an agent that has registered.
 type RegisteredDevice struct {
-	DeviceID     string    `json:"deviceId"`
-	AgentVersion string    `json:"agentVersion"`
-	DeviceType   string    `json:"deviceType"`
-	RegisteredAt time.Time `json:"registeredAt"`
-	LastSeen     time.Time `json:"lastSeen"`
+	DeviceID     string            `json:"deviceId"`
+	AgentVersion string            `json:"agentVersion"`
+	DeviceType   DeviceType        `json:"deviceType"`
+	Labels       map[string]string `json:"labels"`
+	Capabilities []string          `json:"capabilities"`
+	RegisteredAt time.Time         `json:"registeredAt"`
+	LastSeen     time.Time         `json:"lastSeen"`
 }
 
 type registeredDeviceView struct {
-	DeviceID     string    `json:"deviceId"`
-	AgentVersion string    `json:"agentVersion"`
-	DeviceType   string    `json:"deviceType"`
-	RegisteredAt time.Time `json:"registeredAt"`
-	LastSeen     time.Time `json:"lastSeen"`
-	Online       bool      `json:"online"`
+	DeviceID     string            `json:"deviceId"`
+	AgentVersion string            `json:"agentVersion"`
+	DeviceType   DeviceType        `json:"deviceType"`
+	Labels       map[string]string `json:"labels"`
+	Capabilities []string          `json:"capabilities"`
+	RegisteredAt time.Time         `json:"registeredAt"`
+	LastSeen     time.Time         `json:"lastSeen"`
+	Online       bool              `json:"online"`
 }
 
 // DeviceStatus is reported by agents after executing the desired command.
@@ -44,11 +90,14 @@ type DeviceStatus struct {
 }
 
 type deviceStatusView struct {
-	DeviceID string `json:"deviceId"`
-	Version  string `json:"version"`
-	State    string `json:"state"`
-	Message  string `json:"message"`
-	Online   bool   `json:"online"`
+	DeviceID     string            `json:"deviceId"`
+	Version      string            `json:"version"`
+	State        string            `json:"state"`
+	Message      string            `json:"message"`
+	DeviceType   DeviceType        `json:"deviceType"`
+	Labels       map[string]string `json:"labels"`
+	Capabilities []string          `json:"capabilities"`
+	Online       bool              `json:"online"`
 }
 
 // Server holds shared state guarded by a mutex to be safe for concurrent access.
@@ -157,6 +206,22 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "deviceId is required", http.StatusBadRequest)
 		return
 	}
+	if !isValidDeviceType(req.DeviceType) {
+		http.Error(w, "invalid deviceType", http.StatusBadRequest)
+		return
+	}
+	if req.Labels == nil {
+		req.Labels = map[string]string{}
+	}
+	if req.Capabilities == nil {
+		req.Capabilities = []string{}
+	}
+	for _, cap := range req.Capabilities {
+		if !isCapabilityAllowed(req.DeviceType, cap) {
+			http.Error(w, "capability not allowed for deviceType", http.StatusBadRequest)
+			return
+		}
+	}
 
 	now := time.Now()
 	s.mu.Lock()
@@ -171,6 +236,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		DeviceID:     req.DeviceID,
 		AgentVersion: req.AgentVersion,
 		DeviceType:   req.DeviceType,
+		Labels:       req.Labels,
+		Capabilities: req.Capabilities,
 		RegisteredAt: req.RegisteredAt,
 		LastSeen:     req.LastSeen,
 	}
@@ -240,6 +307,8 @@ func (s *Server) handleRegisteredDevices(w http.ResponseWriter, r *http.Request)
 			DeviceID:     d.DeviceID,
 			AgentVersion: d.AgentVersion,
 			DeviceType:   d.DeviceType,
+			Labels:       d.Labels,
+			Capabilities: d.Capabilities,
 			RegisteredAt: d.RegisteredAt,
 			LastSeen:     d.LastSeen,
 			Online:       isOnline(d.LastSeen),
@@ -264,15 +333,19 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	statuses := make([]deviceStatusView, 0, len(s.deviceStatuses))
 	for id, st := range s.deviceStatuses {
 		lastSeen := time.Time{}
-		if reg, ok := s.registeredDevices[id]; ok {
+		reg, ok := s.registeredDevices[id]
+		if ok {
 			lastSeen = reg.LastSeen
 		}
 		statuses = append(statuses, deviceStatusView{
-			DeviceID: st.DeviceID,
-			Version:  st.Version,
-			State:    st.State,
-			Message:  st.Message,
-			Online:   isOnline(lastSeen),
+			DeviceID:     st.DeviceID,
+			Version:      st.Version,
+			State:        st.State,
+			Message:      st.Message,
+			DeviceType:   reg.DeviceType,
+			Labels:       reg.Labels,
+			Capabilities: reg.Capabilities,
+			Online:       isOnline(lastSeen),
 		})
 	}
 	s.mu.Unlock()
@@ -323,4 +396,17 @@ func isOnline(lastSeen time.Time) bool {
 		return false
 	}
 	return time.Since(lastSeen) <= offlineThreshold
+}
+
+func isValidDeviceType(dt DeviceType) bool {
+	switch dt {
+	case DeviceTypeServer, DeviceTypeNetworkSwitch, DeviceTypeDPU, DeviceTypeSOC, DeviceTypeBMC, DeviceTypeSimulator:
+		return true
+	default:
+		return false
+	}
+}
+
+func isCapabilityAllowed(dt DeviceType, cap string) bool {
+	return allowedCapabilities[dt][cap]
 }

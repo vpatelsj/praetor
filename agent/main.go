@@ -43,7 +43,12 @@ func main() {
 		log.Fatal("DEVICE_ID is required")
 	}
 	agentVersion := getenvDefault("AGENT_VERSION", "1.0.0")
-	deviceType := getenvDefault("DEVICE_TYPE", "simulated")
+	deviceType := getenvDefault("DEVICE_TYPE", "Simulator")
+	labels := map[string]string{
+		"rack": "demo",
+		"role": strings.ToLower(deviceType),
+	}
+	capabilities := defaultCapabilities(deviceType)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -56,7 +61,7 @@ func main() {
 
 	currentVersion := ""
 	log.Printf("agent %s starting; registering with manager", deviceID)
-	if err := registerWithManager(ctx, client, deviceID, agentVersion, deviceType); err != nil {
+	if err := registerWithManager(ctx, client, deviceID, agentVersion, deviceType, labels, capabilities); err != nil {
 		log.Fatalf("failed to register: %v", err)
 	}
 	go sendHeartbeats(ctx, hbClient, deviceID)
@@ -231,11 +236,13 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func registerWithManager(ctx context.Context, client *http.Client, deviceID, agentVersion, deviceType string) error {
-	payload, err := json.Marshal(map[string]string{
+func registerWithManager(ctx context.Context, client *http.Client, deviceID, agentVersion, deviceType string, labels map[string]string, capabilities []string) error {
+	payload, err := json.Marshal(map[string]interface{}{
 		"deviceId":     deviceID,
 		"agentVersion": agentVersion,
 		"deviceType":   deviceType,
+		"labels":       labels,
+		"capabilities": capabilities,
 	})
 	if err != nil {
 		return err
@@ -325,4 +332,19 @@ func getenvDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func defaultCapabilities(deviceType string) []string {
+	switch deviceType {
+	case "Server", "DPU":
+		return []string{"systemd", "raw-binary"}
+	case "NetworkSwitch", "SOC":
+		return []string{"systemd", "raw-binary"}
+	case "BMC":
+		return []string{"initd", "raw-binary"}
+	case "Simulator":
+		return []string{"systemd", "raw-binary"}
+	default:
+		return []string{"systemd", "raw-binary"}
+	}
 }
