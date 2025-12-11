@@ -123,6 +123,7 @@ type deviceStatusView struct {
 
 type rolloutRequest struct {
 	Version         string            `json:"version"`
+	Command         []string          `json:"command"`
 	MatchLabels     map[string]string `json:"matchLabels"`
 	MaxFailureRatio float64           `json:"maxFailureRatio"`
 }
@@ -229,8 +230,10 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	if req.MatchLabels == nil {
 		req.MatchLabels = map[string]string{}
 	}
-
 	s.mu.Lock()
+	if len(req.Command) == 0 {
+		req.Command = s.desired.Command
+	}
 	selector := Selector{MatchLabels: req.MatchLabels}
 	targets := make([]string, 0)
 	for id, dev := range s.registeredDevices {
@@ -256,6 +259,7 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	activeGeneration = gen
 	generations[gen.ID] = gen
 	s.desired.Version = req.Version
+	s.desired.Command = req.Command
 	s.mu.Unlock()
 
 	log.Printf("[ROLLOUT] generation=%d version=%s selector=%+v targets=%d", gen.ID, gen.Version, selector.MatchLabels, gen.TotalTargets)
