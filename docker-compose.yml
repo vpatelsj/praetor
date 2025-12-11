@@ -1,26 +1,115 @@
+version: "3.9"
+
 services:
   manager:
     build: ./manager
     ports:
       - "8080:8080"
 
-  device1:
+  # Servers
+  server1:
     build: ./agent
     environment:
-      - DEVICE_ID=device1
+      - DEVICE_ID=server1
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=Server
+    depends_on:
+      - manager
+  server2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=server2
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=Server
     depends_on:
       - manager
 
-  device2:
+  # Network Switches
+  switch1:
     build: ./agent
     environment:
-      - DEVICE_ID=device2
+      - DEVICE_ID=switch1
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=NetworkSwitch
+    depends_on:
+      - manager
+  switch2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=switch2
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=NetworkSwitch
     depends_on:
       - manager
 
-  device3:
+  # DPUs
+  dpu1:
     build: ./agent
     environment:
-      - DEVICE_ID=device3
+      - DEVICE_ID=dpu1
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=DPU
+    depends_on:
+      - manager
+  dpu2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=dpu2
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=DPU
+    depends_on:
+      - manager
+
+  # SOCs
+  soc1:
+    build: ./agent
+    environment:
+      - DEVICE_ID=soc1
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=SOC
+    depends_on:
+      - manager
+  soc2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=soc2
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=SOC
+    depends_on:
+      - manager
+
+  # BMCs
+  bmc1:
+    build: ./agent
+    environment:
+      - DEVICE_ID=bmc1
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=BMC
+    depends_on:
+      - manager
+  bmc2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=bmc2
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=BMC
+    depends_on:
+      - manager
+
+  # Simulators
+  sim1:
+    build: ./agent
+    environment:
+      - DEVICE_ID=sim1
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=Simulator
+    depends_on:
+      - manager
+  sim2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=sim2
+      - AGENT_VERSION=1.0.0
+      - DEVICE_TYPE=Simulator
     depends_on:
       - manager
