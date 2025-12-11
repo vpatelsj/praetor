@@ -223,6 +223,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
+	if reg, ok := s.registeredDevices[status.DeviceID]; ok {
+		reg.LastSeen = time.Now()
+		s.registeredDevices[status.DeviceID] = reg
+	}
 	s.deviceStatuses[status.DeviceID] = status
 	s.mu.Unlock()
 
