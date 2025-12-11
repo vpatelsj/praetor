@@ -1,31 +1,39 @@
 # Praetor
 
-Small Go-based device-management simulation with a manager and three agents running via Docker Compose.
+Small Go-based device-management simulation with a manager service and multiple polling agents that communicate over HTTP. Use the Docker Compose setup to bring everything up locally.
 
-## Structure
-- `praetor/manager`: HTTP manager service
-- `praetor/agent`: polling agent and Dockerfile
-- `praetor/docker-compose.yml`: brings up manager + three agents
+## Project layout
+- `manager/`: HTTP manager that tracks device registration, desired state, heartbeats, and status reports.
+- `agent/`: Lightweight agent that registers itself, polls desired state, executes commands, reports status, and sends heartbeats.
+- `docker-compose.yml`: Builds and starts the manager plus multiple agents (default `device1`, `device2`, `device3`).
 
-## Run
+## Running the stack
 ```sh
 docker compose up --build
 ```
+The manager listens on `localhost:8080`. Agents talk to it over the Docker network.
 
 ## Manager HTTP API
-- `POST /register` — agent registration with `deviceId`, `agentVersion`, `deviceType` (idempotent; updates `lastSeen`).
-- `GET /desired/<deviceId>` — fetches the current global desired state (per-device path, but single global payload).
-- `POST /updateDesired` — update global desired state: `{"version":"vX","command":[...args...]}`.
-- `POST /status` — agent posts execution status: `deviceId`, `version`, `state`, `message`.
-- `GET /devices/registered` — list registered devices with metadata and timestamps.
-- `GET /devices` — list latest statuses posted by agents.
+- `POST /register` — register an agent with `deviceId`, `agentVersion`, and `deviceType`; idempotent and refreshes `lastSeen`.
+- `POST /heartbeat` — lightweight heartbeat with `deviceId`; updates `lastSeen` so online/offline can be inferred.
+- `GET /desired/<deviceId>` — fetch the current desired state. The payload is global, but the path is per-device for clarity.
+- `POST /updateDesired` — update global desired state, e.g. `{ "version": "v2", "command": ["echo", "Hello"] }`.
+- `POST /status` — post an execution status with `deviceId`, `version`, `state`, and `message`.
+- `GET /devices/registered` — list registered devices with metadata, `registeredAt`/`lastSeen`, and an `online` boolean (online if heartbeat/status within 15s).
+- `GET /devices` — list the last status per device along with an `online` indicator derived from the most recent heartbeat/status.
+
+The manager starts with desired state `v1` that echoes `"Hello from Praetor v1!"`.
 
 ## Agent behavior
-- On start, registers via `/register` with its `DEVICE_ID`, `AGENT_VERSION` (default `1.0.0`), and `DEVICE_TYPE` (default `simulated`).
-- Polls `/desired/<DEVICE_ID>` every 2s; if `version` changes, executes `command` and posts `/status`.
-- Retries registration, desired fetch, and status posts with backoff.
+- Environment:
+  - `DEVICE_ID` (required) — unique identifier per container.
+  - `AGENT_VERSION` (default: `1.0.0`)
+  - `DEVICE_TYPE` (default: `simulated`)
+- On startup, the agent registers with the manager and begins polling `/desired/<DEVICE_ID>` every 2s.
+- Desired state changes trigger command execution (via `exec.CommandContext`) and a POST to `/status` containing the result (`state` + `message`).
+- Heartbeats are sent to `/heartbeat` every 5s to keep `lastSeen` fresh, and failed requests/decodes are retried with backoff.
 
-## Update desired state at runtime
+## Updating desired state at runtime
 ```sh
 curl -X POST http://localhost:8080/updateDesired \
   -H "Content-Type: application/json" \
@@ -43,7 +51,8 @@ curl http://localhost:8080/desired/device1
 
 ## Expected behavior
 - Agents poll the manager every 2s, detect desired-version changes, run the command, and POST status back.
-- Manager prints status reports it receives.
+- Heartbeats keep devices marked online; if the manager has not heard from a device in 15s, it reports `online: false` in list endpoints.
+- Manager logs registrations, desired updates, heartbeats, and status reports.
 
 ## Clean up
 ```sh
