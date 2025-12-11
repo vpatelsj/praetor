@@ -75,6 +75,20 @@ type RegisteredDevice struct {
 	LastSeen     time.Time         `json:"lastSeen"`
 }
 
+type Generation struct {
+	ID              int64             `json:"id"`
+	Version         string            `json:"version"`
+	Selector        Selector          `json:"selector"`
+	CreatedAt       time.Time         `json:"createdAt"`
+	State           string            `json:"state"` // Planned, Running, Paused, Succeeded, Failed
+	UpdatedDevices  map[string]bool   `json:"updatedDevices"`
+	FailedDevices   map[string]string `json:"failedDevices"`
+	TotalTargets    int               `json:"totalTargets"`
+	SuccessCount    int               `json:"successCount"`
+	FailureCount    int               `json:"failureCount"`
+	MaxFailureRatio float64           `json:"maxFailureRatio"`
+}
+
 type registeredDeviceView struct {
 	DeviceID     string            `json:"deviceId"`
 	AgentVersion string            `json:"agentVersion"`
@@ -108,8 +122,16 @@ type deviceStatusView struct {
 }
 
 type rolloutRequest struct {
-	Desired  DesiredState `json:"desired"`
-	Selector Selector     `json:"selector"`
+	Version         string            `json:"version"`
+	MatchLabels     map[string]string `json:"matchLabels"`
+	MaxFailureRatio float64           `json:"maxFailureRatio"`
+}
+
+type rolloutStatusRequest struct {
+	DeviceID     string `json:"deviceId"`
+	GenerationID int64  `json:"generationId"`
+	State        string `json:"state"`
+	Message      string `json:"message"`
 }
 
 // Server holds shared state guarded by a mutex to be safe for concurrent access.
@@ -123,6 +145,9 @@ type Server struct {
 var activeSelector = Selector{
 	MatchLabels: map[string]string{},
 }
+var generations = map[int64]*Generation{}
+var activeGeneration *Generation
+var nextGenerationID int64 = 1
 
 func main() {
 	srv := &Server{
@@ -135,8 +160,10 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/desired/", srv.handleDesired) // GET /desired/<deviceId>
+	mux.HandleFunc("/desired/", srv.handleDesired) // GET /desired/<deviceId> (legacy)
 	mux.HandleFunc("/rollout", srv.handleRollout)
+	mux.HandleFunc("/rollout/", srv.handleRolloutTarget)
+	mux.HandleFunc("/rolloutStatus", srv.handleRolloutStatus)
 	mux.HandleFunc("/register", srv.handleRegister)
 	mux.HandleFunc("/heartbeat", srv.handleHeartbeat)
 	mux.HandleFunc("/devices/registered", srv.handleRegisteredDevices)
@@ -195,30 +222,164 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Desired.Version == "" {
-		http.Error(w, "desired.version is required", http.StatusBadRequest)
+	if req.Version == "" {
+		http.Error(w, "version is required", http.StatusBadRequest)
 		return
 	}
-	if len(req.Desired.Command) == 0 {
-		http.Error(w, "desired.command is required", http.StatusBadRequest)
-		return
-	}
-	if req.Selector.MatchLabels == nil {
-		req.Selector.MatchLabels = map[string]string{}
+	if req.MatchLabels == nil {
+		req.MatchLabels = map[string]string{}
 	}
 
 	s.mu.Lock()
-	s.desired = req.Desired
-	activeSelector = req.Selector
+	selector := Selector{MatchLabels: req.MatchLabels}
+	targets := make([]string, 0)
+	for id, dev := range s.registeredDevices {
+		if deviceMatchesSelector(dev, selector) {
+			targets = append(targets, id)
+		}
+	}
+
+	gen := &Generation{
+		ID:              nextGenerationID,
+		Version:         req.Version,
+		Selector:        selector,
+		CreatedAt:       time.Now(),
+		State:           "Running",
+		UpdatedDevices:  make(map[string]bool),
+		FailedDevices:   make(map[string]string),
+		TotalTargets:    len(targets),
+		MaxFailureRatio: req.MaxFailureRatio,
+	}
+
+	nextGenerationID++
+	activeSelector = selector
+	activeGeneration = gen
+	generations[gen.ID] = gen
+	s.desired.Version = req.Version
 	s.mu.Unlock()
 
-	log.Printf("[ROLLOUT] desired=%s selector=%+v", req.Desired.Version, req.Selector.MatchLabels)
+	log.Printf("[ROLLOUT] generation=%d version=%s selector=%+v targets=%d", gen.ID, gen.Version, selector.MatchLabels, gen.TotalTargets)
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(req); err != nil {
+	if err := json.NewEncoder(w).Encode(gen); err != nil {
 		http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) handleRolloutTarget(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	deviceID := strings.TrimPrefix(r.URL.Path, "/rollout/")
+	if deviceID == "" || deviceID == r.URL.Path {
+		http.Error(w, "deviceId is required in path", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	gen := activeGeneration
+	device, ok := s.registeredDevices[deviceID]
+	command := s.desired.Command
+	s.mu.Unlock()
+
+	if gen == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !ok {
+		http.Error(w, "device not registered", http.StatusNotFound)
+		return
+	}
+	if !deviceMatchesSelector(device, gen.Selector) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	resp := struct {
+		GenerationID int64    `json:"generationId"`
+		Version      string   `json:"version"`
+		Command      []string `json:"command"`
+	}{
+		GenerationID: gen.ID,
+		Version:      gen.Version,
+		Command:      command,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "failed to encode rollout target", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleRolloutStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var req rolloutStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.DeviceID == "" || req.GenerationID == 0 || (req.State != "Succeeded" && req.State != "Failed") {
+		http.Error(w, "deviceId, generationId, and valid state are required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	gen, ok := generations[req.GenerationID]
+	device, deviceKnown := s.registeredDevices[req.DeviceID]
+	s.mu.Unlock()
+
+	if !ok {
+		http.Error(w, "generation not found", http.StatusNotFound)
+		return
+	}
+	if !deviceKnown || !deviceMatchesSelector(device, gen.Selector) {
+		http.Error(w, "device not part of generation", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if gen.UpdatedDevices[req.DeviceID] {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if _, exists := gen.FailedDevices[req.DeviceID]; exists {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	switch req.State {
+	case "Succeeded":
+		gen.UpdatedDevices[req.DeviceID] = true
+		gen.SuccessCount++
+	case "Failed":
+		gen.FailedDevices[req.DeviceID] = req.Message
+		gen.FailureCount++
+	}
+
+	var failureRatio float64
+	if gen.TotalTargets > 0 {
+		failureRatio = float64(gen.FailureCount) / float64(gen.TotalTargets)
+	}
+
+	if failureRatio >= gen.MaxFailureRatio && gen.State == "Running" {
+		gen.State = "Paused"
+	}
+	if gen.SuccessCount == gen.TotalTargets {
+		gen.State = "Succeeded"
+	}
+
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) handleUpdateSelector(w http.ResponseWriter, r *http.Request) {
