@@ -300,16 +300,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	statusOnline := false
 	s.mu.Lock()
 	if reg, ok := s.registeredDevices[status.DeviceID]; ok {
 		reg.LastSeen = time.Now()
 		s.registeredDevices[status.DeviceID] = reg
+		statusOnline = isOnline(reg.LastSeen)
 	}
 	s.deviceStatuses[status.DeviceID] = status
 	s.mu.Unlock()
 
 	state := "OFFLINE"
-	if reg, ok := s.registeredDevices[status.DeviceID]; ok && isOnline(reg.LastSeen) {
+	if statusOnline {
 		state = "ONLINE"
 	}
 	log.Printf("status from %s version=%s state=%s message=%s %s", status.DeviceID, status.Version, status.State, status.Message, state)
