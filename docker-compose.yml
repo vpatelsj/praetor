@@ -1,0 +1,26 @@
+services:
+  manager:
+    build: ./manager
+    ports:
+      - "8080:8080"
+
+  device1:
+    build: ./agent
+    environment:
+      - DEVICE_ID=device1
+    depends_on:
+      - manager
+
+  device2:
+    build: ./agent
+    environment:
+      - DEVICE_ID=device2
+    depends_on:
+      - manager
+
+  device3:
+    build: ./agent
+    environment:
+      - DEVICE_ID=device3
+    depends_on:
+      - manager
