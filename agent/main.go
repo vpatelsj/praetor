@@ -17,10 +17,12 @@ import (
 )
 
 const (
-	desiredBaseURL = "http://manager:8080/desired"
-	registerURL    = "http://manager:8080/register"
-	statusURL      = "http://manager:8080/status"
-	pollInterval   = 2 * time.Second
+	desiredBaseURL    = "http://manager:8080/desired"
+	registerURL       = "http://manager:8080/register"
+	statusURL         = "http://manager:8080/status"
+	heartbeatURL      = "http://manager:8080/heartbeat"
+	pollInterval      = 2 * time.Second
+	heartbeatInterval = 5 * time.Second
 )
 
 type desiredState struct {
@@ -47,6 +49,7 @@ func main() {
 	defer stop()
 
 	client := &http.Client{Timeout: 5 * time.Second}
+	hbClient := &http.Client{Timeout: 1 * time.Second}
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -56,6 +59,7 @@ func main() {
 	if err := registerWithManager(ctx, client, deviceID, agentVersion, deviceType); err != nil {
 		log.Fatalf("failed to register: %v", err)
 	}
+	go sendHeartbeats(ctx, hbClient, deviceID)
 	log.Printf("agent %s registered; polling manager at %s/<deviceId>", deviceID, desiredBaseURL)
 
 	for {
@@ -271,6 +275,49 @@ func registerWithManager(ctx context.Context, client *http.Client, deviceID, age
 			return ctx.Err()
 		}
 	}
+}
+
+func sendHeartbeats(ctx context.Context, client *http.Client, deviceID string) {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := postHeartbeat(ctx, client, deviceID); err != nil {
+				log.Printf("heartbeat failed: %v", err)
+			}
+		}
+	}
+}
+
+func postHeartbeat(ctx context.Context, client *http.Client, deviceID string) error {
+	payload, err := json.Marshal(map[string]string{"deviceId": deviceID})
+	if err != nil {
+		return err
+	}
+
+	hbCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(hbCtx, http.MethodPost, heartbeatURL, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return fmt.Errorf("heartbeat returned %s", resp.Status)
 }
 
 func getenvDefault(key, fallback string) string {
