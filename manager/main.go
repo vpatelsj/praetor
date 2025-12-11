@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const offlineThreshold = 15 * time.Second
+
 // DesiredState represents the command the manager wants agents to run.
 type DesiredState struct {
 	Version string   `json:"version"`
@@ -24,12 +26,29 @@ type RegisteredDevice struct {
 	LastSeen     time.Time `json:"lastSeen"`
 }
 
+type registeredDeviceView struct {
+	DeviceID     string    `json:"deviceId"`
+	AgentVersion string    `json:"agentVersion"`
+	DeviceType   string    `json:"deviceType"`
+	RegisteredAt time.Time `json:"registeredAt"`
+	LastSeen     time.Time `json:"lastSeen"`
+	Online       bool      `json:"online"`
+}
+
 // DeviceStatus is reported by agents after executing the desired command.
 type DeviceStatus struct {
 	DeviceID string `json:"deviceId"`
 	Version  string `json:"version"`
 	State    string `json:"state"`
 	Message  string `json:"message"`
+}
+
+type deviceStatusView struct {
+	DeviceID string `json:"deviceId"`
+	Version  string `json:"version"`
+	State    string `json:"state"`
+	Message  string `json:"message"`
+	Online   bool   `json:"online"`
 }
 
 // Server holds shared state guarded by a mutex to be safe for concurrent access.
@@ -54,6 +73,7 @@ func main() {
 	mux.HandleFunc("/desired/", srv.handleDesired) // GET /desired/<deviceId>
 	mux.HandleFunc("/updateDesired", srv.handleUpdateDesired)
 	mux.HandleFunc("/register", srv.handleRegister)
+	mux.HandleFunc("/heartbeat", srv.handleHeartbeat)
 	mux.HandleFunc("/devices/registered", srv.handleRegisteredDevices)
 	mux.HandleFunc("/devices", srv.handleDevices)
 	mux.HandleFunc("/status", srv.handleStatus)
@@ -165,6 +185,47 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var payload struct {
+		DeviceID string `json:"deviceId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if payload.DeviceID == "" {
+		http.Error(w, "deviceId is required", http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	s.mu.Lock()
+	reg, ok := s.registeredDevices[payload.DeviceID]
+	if ok {
+		reg.LastSeen = now
+		s.registeredDevices[payload.DeviceID] = reg
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		http.Error(w, "device not registered", http.StatusNotFound)
+		return
+	}
+
+	state := "OFFLINE"
+	if isOnline(now) {
+		state = "ONLINE"
+	}
+	log.Printf("[HEARTBEAT] device=%s lastSeen=%s %s", payload.DeviceID, now.Format(time.RFC3339), state)
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func (s *Server) handleRegisteredDevices(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -173,9 +234,16 @@ func (s *Server) handleRegisteredDevices(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 
 	s.mu.Lock()
-	devices := make([]RegisteredDevice, 0, len(s.registeredDevices))
+	devices := make([]registeredDeviceView, 0, len(s.registeredDevices))
 	for _, d := range s.registeredDevices {
-		devices = append(devices, d)
+		devices = append(devices, registeredDeviceView{
+			DeviceID:     d.DeviceID,
+			AgentVersion: d.AgentVersion,
+			DeviceType:   d.DeviceType,
+			RegisteredAt: d.RegisteredAt,
+			LastSeen:     d.LastSeen,
+			Online:       isOnline(d.LastSeen),
+		})
 	}
 	s.mu.Unlock()
 
@@ -193,9 +261,19 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	s.mu.Lock()
-	statuses := make([]DeviceStatus, 0, len(s.deviceStatuses))
-	for _, st := range s.deviceStatuses {
-		statuses = append(statuses, st)
+	statuses := make([]deviceStatusView, 0, len(s.deviceStatuses))
+	for id, st := range s.deviceStatuses {
+		lastSeen := time.Time{}
+		if reg, ok := s.registeredDevices[id]; ok {
+			lastSeen = reg.LastSeen
+		}
+		statuses = append(statuses, deviceStatusView{
+			DeviceID: st.DeviceID,
+			Version:  st.Version,
+			State:    st.State,
+			Message:  st.Message,
+			Online:   isOnline(lastSeen),
+		})
 	}
 	s.mu.Unlock()
 
@@ -230,6 +308,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deviceStatuses[status.DeviceID] = status
 	s.mu.Unlock()
 
-	log.Printf("status from %s version=%s state=%s message=%s", status.DeviceID, status.Version, status.State, status.Message)
+	state := "OFFLINE"
+	if reg, ok := s.registeredDevices[status.DeviceID]; ok && isOnline(reg.LastSeen) {
+		state = "ONLINE"
+	}
+	log.Printf("status from %s version=%s state=%s message=%s %s", status.DeviceID, status.Version, status.State, status.Message, state)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func isOnline(lastSeen time.Time) bool {
+	if lastSeen.IsZero() {
+		return false
+	}
+	return time.Since(lastSeen) <= offlineThreshold
 }
