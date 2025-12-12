@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,12 +14,6 @@ import (
 )
 
 const offlineThreshold = 15 * time.Second
-
-// DesiredState represents the command the manager wants agents to run.
-type DesiredState struct {
-	Version string   `json:"version"`
-	Command []string `json:"command"`
-}
 
 type deviceStatusView struct {
 	DeviceID   string            `json:"deviceId"`
@@ -33,47 +26,15 @@ type deviceStatusView struct {
 	Selected   bool              `json:"selected"`
 }
 
-type rolloutRequest struct {
-	Version         string            `json:"version"`
-	Command         []string          `json:"command"`
-	MatchLabels     map[string]string `json:"matchLabels"`
-	MaxFailureRatio float64           `json:"maxFailureRatio"`
-}
-
-type rolloutStatusRequest struct {
-	DeviceID     string `json:"deviceId"`
-	GenerationID int64  `json:"generationId"`
-	State        string `json:"state"`
-	Message      string `json:"message"`
-}
-
-type legacyGeneration struct {
-	ID              int64             `json:"id"`
-	Version         string            `json:"version"`
-	Selector        map[string]string `json:"selector"`
-	CreatedAt       time.Time         `json:"createdAt"`
-	State           string            `json:"state"`
-	UpdatedDevices  map[string]bool   `json:"updatedDevices"`
-	FailedDevices   map[string]string `json:"failedDevices"`
-	TotalTargets    int               `json:"totalTargets"`
-	SuccessCount    int               `json:"successCount"`
-	FailureCount    int               `json:"failureCount"`
-	MaxFailureRatio float64           `json:"maxFailureRatio"`
-}
-
 // Server holds shared state guarded by a mutex to be safe for concurrent access.
 type Server struct {
 	mu              sync.Mutex
-	desired         DesiredState
 	devicesByType   map[types.DeviceType]map[string]*model.Device
 	deviceTypeIndex map[string]types.DeviceType
 	deviceStatuses  map[string]model.DeviceStatus
 }
 
-var activeSelector = map[string]string{}
 var rolloutsByType = map[types.DeviceType]map[string]*model.Rollout{}
-var activeRollout *model.Rollout
-var nextGenerationID int64 = 1
 
 type rolloutController interface {
 	ReconcileRollouts()
@@ -81,10 +42,6 @@ type rolloutController interface {
 
 func main() {
 	srv := &Server{
-		desired: DesiredState{
-			Version: "v1",
-			Command: []string{"echo", "Hello from Praetor v1!"},
-		},
 		devicesByType:   make(map[types.DeviceType]map[string]*model.Device),
 		deviceTypeIndex: make(map[string]types.DeviceType),
 		deviceStatuses:  make(map[string]model.DeviceStatus),
@@ -95,6 +52,8 @@ func main() {
 		types.DeviceTypeDPU,
 		types.DeviceTypeSOC,
 		types.DeviceTypeBMC,
+		types.DeviceTypeServer,
+		types.DeviceTypeSim,
 	}
 	for _, dt := range deviceTypes {
 		if rolloutsByType[dt] == nil {
@@ -109,21 +68,22 @@ func main() {
 	dpuController := controllers.NewDPUController(&srv.mu, rolloutsByType[types.DeviceTypeDPU], srv.devicesByType[types.DeviceTypeDPU])
 	socController := controllers.NewSOCController(&srv.mu, rolloutsByType[types.DeviceTypeSOC], srv.devicesByType[types.DeviceTypeSOC])
 	bmcController := controllers.NewBMCController(&srv.mu, rolloutsByType[types.DeviceTypeBMC], srv.devicesByType[types.DeviceTypeBMC])
+	serverController := controllers.NewServerController(&srv.mu, rolloutsByType[types.DeviceTypeServer], srv.devicesByType[types.DeviceTypeServer])
+	simController := controllers.NewSimulatorController(&srv.mu, rolloutsByType[types.DeviceTypeSim], srv.devicesByType[types.DeviceTypeSim])
 
 	startControllerLoop(switchController)
 	startControllerLoop(dpuController)
 	startControllerLoop(socController)
 	startControllerLoop(bmcController)
+	startControllerLoop(serverController)
+	startControllerLoop(simController)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/desired/", srv.handleDesired) // GET /desired/<deviceId> (legacy)
-	mux.HandleFunc("/rollout", srv.handleRollout)
-	mux.HandleFunc("/rollout/", srv.handleRolloutTarget)
-	mux.HandleFunc("/rolloutStatus", srv.handleRolloutStatus)
 	mux.HandleFunc("/register", srv.handleRegister)
 	mux.HandleFunc("/heartbeat", srv.handleHeartbeat)
 	mux.HandleFunc("/devices/registered", srv.handleRegisteredDevices)
 	mux.HandleFunc("/devices", srv.handleDevices)
+	mux.HandleFunc("/api/v1/devices", srv.handleDevices)
 	mux.HandleFunc("/api/v1/devicetypes/", srv.handleAPIDeviceTypes)
 	mux.HandleFunc("/status", srv.handleStatus)
 
@@ -141,135 +101,6 @@ func startControllerLoop(ctrl rolloutController) {
 			ctrl.ReconcileRollouts()
 		}
 	}()
-}
-
-func (s *Server) handleDesired(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	deviceID := strings.TrimPrefix(r.URL.Path, "/desired/")
-	if deviceID == "" || deviceID == r.URL.Path {
-		http.Error(w, "deviceId is required in path", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	desired := s.desired
-	device, ok := s.getDeviceLocked(deviceID)
-	s.mu.Unlock()
-
-	if !ok {
-		http.Error(w, "device not registered", http.StatusNotFound)
-		return
-	}
-
-	if !deviceMatchesSelector(device, activeSelector) {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(desired); err != nil {
-		http.Error(w, "failed to encode state", http.StatusInternalServerError)
-		return
-	}
-}
-
-func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
-	log.Println("[DEPRECATED] use /api/v1/devicetypes/<type>/rollouts")
-	// Only handle GET for exact /rollout path (list all rollouts)
-	if r.Method == http.MethodGet && r.URL.Path == "/rollout" {
-		s.handleListRollouts(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	defer r.Body.Close()
-
-	var req rolloutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	if req.Version == "" {
-		http.Error(w, "version is required", http.StatusBadRequest)
-		return
-	}
-	if req.MatchLabels == nil {
-		req.MatchLabels = map[string]string{}
-	}
-	s.mu.Lock()
-	if len(req.Command) == 0 {
-		req.Command = s.desired.Command
-	}
-	selector := copySelector(req.MatchLabels)
-	devices := s.allDevicesLocked()
-	targets := make([]string, 0, len(devices))
-	for _, dev := range devices {
-		if deviceMatchesSelector(dev, selector) {
-			targets = append(targets, dev.ID)
-		}
-	}
-
-	name := "legacy-generation-" + strconv.FormatInt(nextGenerationID, 10)
-	now := time.Now()
-	rollout := &model.Rollout{
-		Name:       name,
-		DeviceType: types.DeviceTypeSwitch,
-		CreatedAt:  now,
-		Spec: model.RolloutSpec{
-			Version:     req.Version,
-			Selector:    selector,
-			MaxFailures: req.MaxFailureRatio,
-		},
-		Status: model.RolloutStatus{
-			Generation:         nextGenerationID,
-			ObservedGeneration: nextGenerationID,
-			UpdatedDevices:     make(map[string]bool),
-			FailedDevices:      make(map[string]string),
-			TotalTargets:       len(targets),
-			State:              "Running",
-		},
-	}
-
-	nextGenerationID++
-	activeSelector = selector
-	activeRollout = rollout
-	s.desired.Version = req.Version
-	s.desired.Command = req.Command
-	if rolloutsByType[rollout.DeviceType] == nil {
-		rolloutsByType[rollout.DeviceType] = make(map[string]*model.Rollout)
-	}
-	rolloutsByType[rollout.DeviceType][rollout.Name] = rollout
-	s.mu.Unlock()
-
-	log.Printf("[ROLLOUT] generation=%d version=%s selector=%+v targets=%d", rollout.Status.Generation, rollout.Spec.Version, selector, rollout.Status.TotalTargets)
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(legacyGenerationFromRollout(rollout)); err != nil {
-		http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
-		return
-	}
-}
-
-func legacyGenerationFromRollout(rollout *model.Rollout) legacyGeneration {
-	return legacyGeneration{
-		ID:              rollout.Status.Generation,
-		Version:         rollout.Spec.Version,
-		Selector:        copySelector(rollout.Spec.Selector),
-		CreatedAt:       rollout.CreatedAt,
-		State:           rollout.Status.State,
-		UpdatedDevices:  copyBoolMap(rollout.Status.UpdatedDevices),
-		FailedDevices:   copyStringMap(rollout.Status.FailedDevices),
-		TotalTargets:    rollout.Status.TotalTargets,
-		SuccessCount:    rollout.Status.SuccessCount,
-		FailureCount:    rollout.Status.FailureCount,
-		MaxFailureRatio: rollout.Spec.MaxFailures,
-	}
 }
 
 func cloneRollout(src *model.Rollout) *model.Rollout {
@@ -296,166 +127,6 @@ func cloneRollout(src *model.Rollout) *model.Rollout {
 			State:              src.Status.State,
 		},
 	}
-}
-
-func (s *Server) handleListRollouts(w http.ResponseWriter, r *http.Request) {
-	log.Println("[DEPRECATED] use /api/v1/devicetypes/<type>/rollouts")
-	s.mu.Lock()
-	rollouts := make([]legacyGeneration, 0)
-	for _, typed := range rolloutsByType {
-		for _, rollout := range typed {
-			rollouts = append(rollouts, legacyGenerationFromRollout(rollout))
-		}
-	}
-	s.mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(rollouts); err != nil {
-		http.Error(w, "failed to encode rollouts", http.StatusInternalServerError)
-		return
-	}
-}
-
-func (s *Server) handleRolloutTarget(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	deviceID := strings.TrimPrefix(r.URL.Path, "/rollout/")
-	if deviceID == "" || deviceID == r.URL.Path {
-		http.Error(w, "deviceId is required in path", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	rollout := activeRollout
-	device, ok := s.getDeviceLocked(deviceID)
-	command := s.desired.Command
-	s.mu.Unlock()
-
-	if rollout == nil {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if !ok {
-		http.Error(w, "device not registered", http.StatusNotFound)
-		return
-	}
-	if !deviceMatchesSelector(device, rollout.Spec.Selector) {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	resp := struct {
-		GenerationID int64    `json:"generationId"`
-		Version      string   `json:"version"`
-		Command      []string `json:"command"`
-	}{
-		GenerationID: rollout.Status.Generation,
-		Version:      rollout.Spec.Version,
-		Command:      command,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "failed to encode rollout target", http.StatusInternalServerError)
-		return
-	}
-}
-
-func (s *Server) handleRolloutStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	defer r.Body.Close()
-
-	var req rolloutStatusRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	if req.DeviceID == "" || req.GenerationID == 0 || (req.State != "Succeeded" && req.State != "Failed") {
-		http.Error(w, "deviceId, generationId, and valid state are required", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	rollout, ok := s.findRolloutByGenerationLocked(req.GenerationID)
-	device, deviceKnown := s.getDeviceLocked(req.DeviceID)
-	s.mu.Unlock()
-
-	if !ok {
-		http.Error(w, "generation not found", http.StatusNotFound)
-		return
-	}
-	if !deviceKnown || !deviceMatchesSelector(device, rollout.Spec.Selector) {
-		http.Error(w, "device not part of generation", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if rollout.Status.UpdatedDevices[req.DeviceID] {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-	if _, exists := rollout.Status.FailedDevices[req.DeviceID]; exists {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-
-	switch req.State {
-	case "Succeeded":
-		rollout.Status.UpdatedDevices[req.DeviceID] = true
-	case "Failed":
-		rollout.Status.FailedDevices[req.DeviceID] = req.Message
-	}
-
-	rollout.Status.SuccessCount = len(rollout.Status.UpdatedDevices)
-	rollout.Status.FailureCount = len(rollout.Status.FailedDevices)
-
-	var failureRatio float64
-	if rollout.Status.TotalTargets > 0 {
-		failureRatio = float64(rollout.Status.FailureCount) / float64(rollout.Status.TotalTargets)
-	}
-
-	if failureRatio >= rollout.Spec.MaxFailures && rollout.Status.State == "Running" {
-		rollout.Status.State = "Paused"
-	}
-	if rollout.Status.SuccessCount == rollout.Status.TotalTargets {
-		rollout.Status.State = "Succeeded"
-	}
-
-	w.WriteHeader(http.StatusAccepted)
-}
-
-func (s *Server) handleUpdateSelector(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	defer r.Body.Close()
-
-	var payload struct {
-		MatchLabels map[string]string `json:"matchLabels"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	if payload.MatchLabels == nil {
-		payload.MatchLabels = map[string]string{}
-	}
-
-	s.mu.Lock()
-	activeSelector = copySelector(payload.MatchLabels)
-	s.mu.Unlock()
-
-	log.Printf("[SELECTOR] updated to %+v", payload.MatchLabels)
-	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -616,7 +287,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 			DeviceType: dev.DeviceType,
 			Labels:     dev.Labels,
 			Online:     isOnline(dev.LastSeen),
-			Selected:   deviceMatchesSelector(dev, activeSelector),
+			Selected:   s.deviceSelectedLocked(dev),
 		})
 	}
 	s.mu.Unlock()
@@ -973,6 +644,34 @@ func isOnline(lastSeen time.Time) bool {
 		return false
 	}
 	return time.Since(lastSeen) <= offlineThreshold
+}
+
+func (s *Server) deviceSelectedLocked(dev *model.Device) bool {
+	typed := rolloutsByType[dev.DeviceType]
+	if typed == nil {
+		return false
+	}
+	for _, rollout := range typed {
+		if rollout == nil {
+			continue
+		}
+		if rollout.Status.State != "Planned" && rollout.Status.State != "Running" {
+			continue
+		}
+		if !deviceMatchesSelector(dev, rollout.Spec.Selector) {
+			continue
+		}
+		if rollout.Status.UpdatedDevices != nil && rollout.Status.UpdatedDevices[dev.ID] {
+			continue
+		}
+		if rollout.Status.FailedDevices != nil {
+			if _, failed := rollout.Status.FailedDevices[dev.ID]; failed {
+				continue
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func deviceMatchesSelector(device *model.Device, sel map[string]string) bool {

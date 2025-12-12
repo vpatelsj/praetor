@@ -7,18 +7,34 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"praectl/pkg/client"
+)
+
+var (
+	allDeviceTypes = []string{"switch", "dpu", "soc", "bmc", "server", "simulator"}
 )
 
 var rolloutListCmd = &cobra.Command{
-	Use:   "list <deviceType>",
+	Use:   "list [deviceType]",
 	Short: "List rollout generations",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		deviceType := strings.ToLower(args[0])
+		var typesToQuery []string
+		if len(args) == 0 {
+			typesToQuery = allDeviceTypes
+		} else {
+			typesToQuery = []string{strings.ToLower(args[0])}
+		}
+
 		c := newClient()
-		rollouts, err := c.ListRollouts(cmd.Context(), deviceType)
-		if err != nil {
-			return err
+		rollouts := make([]client.Rollout, 0)
+		for _, dt := range typesToQuery {
+			rs, err := c.ListRollouts(cmd.Context(), dt)
+			if err != nil {
+				return fmt.Errorf("%s: %w", dt, err)
+			}
+			rollouts = append(rollouts, rs...)
 		}
 
 		if len(rollouts) == 0 {
@@ -27,13 +43,17 @@ var rolloutListCmd = &cobra.Command{
 		}
 
 		sort.SliceStable(rollouts, func(i, j int) bool {
-			return rollouts[i].Status.Generation > rollouts[j].Status.Generation
+			if rollouts[i].DeviceType == rollouts[j].DeviceType {
+				return rollouts[i].Status.Generation > rollouts[j].Status.Generation
+			}
+			return rollouts[i].DeviceType < rollouts[j].DeviceType
 		})
 
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "GEN\tNAME\tSTATE\tVERSION\tUPDATED\tFAILED\tTARGETS")
+		fmt.Fprintln(tw, "TYPE\tGEN\tNAME\tSTATE\tVERSION\tUPDATED\tFAILED\tTARGETS")
 		for _, r := range rollouts {
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%d\t%d\t%d\n",
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%d\t%d\n",
+				r.DeviceType,
 				r.Status.Generation,
 				r.Name,
 				r.Status.State,

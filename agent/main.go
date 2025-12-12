@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -17,19 +16,28 @@ import (
 )
 
 const (
-	rolloutBaseURL    = "http://manager:8080/rollout"
-	registerURL       = "http://manager:8080/register"
-	statusURL         = "http://manager:8080/status"
-	heartbeatURL      = "http://manager:8080/heartbeat"
-	rolloutStatusURL  = "http://manager:8080/rolloutStatus"
+	managerBase       = "http://manager:8080"
+	registerURL       = managerBase + "/register"
+	statusURL         = managerBase + "/status"
+	heartbeatURL      = managerBase + "/heartbeat"
 	pollInterval      = 2 * time.Second
 	heartbeatInterval = 5 * time.Second
 )
 
-type rolloutAssignment struct {
-	GenerationID int64    `json:"generationId"`
-	Version      string   `json:"version"`
-	Command      []string `json:"command"`
+type rolloutResource struct {
+	Name       string `json:"name"`
+	DeviceType string `json:"deviceType"`
+	Spec       struct {
+		Version     string            `json:"version"`
+		Selector    map[string]string `json:"selector"`
+		MaxFailures float64           `json:"maxFailures"`
+	} `json:"spec"`
+	Status struct {
+		Generation     int64             `json:"generation"`
+		UpdatedDevices map[string]bool   `json:"updatedDevices"`
+		FailedDevices  map[string]string `json:"failedDevices"`
+		State          string            `json:"state"`
+	} `json:"status"`
 }
 
 type statusReport struct {
@@ -61,14 +69,13 @@ func main() {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
-	var currentGenerationID int64
-	currentVersion := ""
+	applied := map[string]int64{}
 	log.Printf("agent %s starting; registering with manager", deviceID)
 	if err := registerWithManager(ctx, client, deviceID, agentVersion, deviceType, labels, capabilities); err != nil {
 		log.Fatalf("failed to register: %v", err)
 	}
 	go sendHeartbeats(ctx, hbClient, deviceID)
-	log.Printf("agent %s registered; polling manager rollouts at %s/<deviceId>", deviceID, rolloutBaseURL)
+	log.Printf("agent %s registered; watching rollouts at %s", deviceID, rolloutsURL(deviceType))
 
 	for {
 		select {
@@ -76,12 +83,8 @@ func main() {
 			log.Printf("agent %s shutting down", deviceID)
 			return
 		case <-ticker.C:
-			assign, targeted, err := fetchRollout(ctx, client, deviceID)
+			rollout, targeted, err := fetchPendingRollout(ctx, client, deviceID, deviceType, labels, applied)
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					log.Printf("poll canceled: %v", err)
-					return
-				}
 				log.Printf("failed to fetch rollout: %v", err)
 				continue
 			}
@@ -89,22 +92,16 @@ func main() {
 				continue
 			}
 
-			if assign.GenerationID == 0 || assign.Version == "" {
+			if rollout.Status.Generation == 0 || rollout.Spec.Version == "" {
 				continue
 			}
 
-			if assign.GenerationID <= currentGenerationID {
-				continue
-			}
+			log.Printf("agent %s applying rollout %s generation %d version %s", deviceID, rollout.Name, rollout.Status.Generation, rollout.Spec.Version)
 
-			log.Printf("agent %s applying generation %d version %s (was generation %d version %s)", deviceID, assign.GenerationID, assign.Version, currentGenerationID, currentVersion)
-			currentGenerationID = assign.GenerationID
-			currentVersion = assign.Version
-
-			state, message := executeCommand(ctx, assign.Command)
+			state, message := applyRollout(ctx, rollout)
 			report := statusReport{
 				DeviceID: deviceID,
-				Version:  currentVersion,
+				Version:  rollout.Spec.Version,
 				State:    state,
 				Message:  message,
 			}
@@ -117,93 +114,114 @@ func main() {
 			if state == "error" {
 				rolloutState = "Failed"
 			}
-			if err := postRolloutStatus(ctx, client, assign.GenerationID, deviceID, rolloutState, message); err != nil {
+			if err := postRolloutStatus(ctx, client, deviceType, rollout, deviceID, rolloutState, message); err != nil {
 				log.Printf("failed to post rollout status: %v", err)
 			}
+
+			applied[rollout.Name] = rollout.Status.Generation
 		}
 	}
 }
 
-func fetchRollout(ctx context.Context, client *http.Client, deviceID string) (rolloutAssignment, bool, error) {
-	assign := rolloutAssignment{}
-	url := fmt.Sprintf("%s/%s", rolloutBaseURL, deviceID)
+func fetchPendingRollout(ctx context.Context, client *http.Client, deviceID, deviceType string, labels map[string]string, applied map[string]int64) (*rolloutResource, bool, error) {
+	url := rolloutsURL(deviceType)
+	var rollout rolloutResource
 
 	for attempt := 1; attempt <= 3; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return assign, false, err
+			return nil, false, err
 		}
 
 		resp, err := client.Do(req)
 		if err != nil {
-			if ctx.Err() != nil {
-				return assign, false, ctx.Err()
-			}
 			backoff := time.Duration(attempt) * 300 * time.Millisecond
 			log.Printf("manager unreachable (attempt %d): %v; retrying in %s", attempt, err, backoff)
 			if sleepWithContext(ctx, backoff) != nil {
-				return assign, false, ctx.Err()
+				return nil, false, ctx.Err()
 			}
 			continue
 		}
 
 		func() {
 			defer resp.Body.Close()
-			switch resp.StatusCode {
-			case http.StatusOK:
-				err = json.NewDecoder(resp.Body).Decode(&assign)
-			case http.StatusNoContent:
-				// Not targeted by current selector; treat as no desired update.
-				err = nil
-				assign = rolloutAssignment{}
-			default:
+			if resp.StatusCode != http.StatusOK {
 				err = fmt.Errorf("unexpected status: %s", resp.Status)
+				return
 			}
+
+			var rollouts []rolloutResource
+			if decodeErr := json.NewDecoder(resp.Body).Decode(&rollouts); decodeErr != nil {
+				err = decodeErr
+				return
+			}
+
+			for _, ro := range rollouts {
+				if ro.Status.State != "Planned" && ro.Status.State != "Running" {
+					continue
+				}
+				if !matchesSelector(labels, ro.Spec.Selector) {
+					continue
+				}
+				if ro.Status.UpdatedDevices != nil && ro.Status.UpdatedDevices[deviceID] {
+					continue
+				}
+				if ro.Status.FailedDevices != nil {
+					if _, failed := ro.Status.FailedDevices[deviceID]; failed {
+						continue
+					}
+				}
+				if appliedGen, ok := applied[ro.Name]; ok && ro.Status.Generation <= appliedGen {
+					continue
+				}
+				rollout = ro
+				err = nil
+				return
+			}
+			err = nil
 		}()
 
 		if err != nil {
-			if ctx.Err() != nil {
-				return assign, false, ctx.Err()
-			}
 			backoff := time.Duration(attempt) * 300 * time.Millisecond
 			log.Printf("failed to decode rollout (attempt %d): %v; retrying in %s", attempt, err, backoff)
 			if sleepWithContext(ctx, backoff) != nil {
-				return assign, false, ctx.Err()
+				return nil, false, ctx.Err()
 			}
 			continue
 		}
 
-		if resp.StatusCode == http.StatusNoContent {
-			return assign, false, nil
+		if rollout.Name == "" {
+			return nil, false, nil
 		}
 
-		return assign, true, nil
+		return &rollout, true, nil
 	}
 
-	return assign, false, fmt.Errorf("unable to fetch rollout after retries")
+	return nil, false, fmt.Errorf("unable to fetch rollout after retries")
 }
 
-func executeCommand(ctx context.Context, cmdParts []string) (string, string) {
-	if len(cmdParts) == 0 {
-		return "error", "no command provided"
+func rolloutsURL(deviceType string) string {
+	return fmt.Sprintf("%s/api/v1/devicetypes/%s/rollouts", managerBase, strings.ToLower(deviceType))
+}
+
+func rolloutStatusURL(deviceType, name string) string {
+	return fmt.Sprintf("%s/api/v1/devicetypes/%s/rollouts/%s/status", managerBase, strings.ToLower(deviceType), url.PathEscape(name))
+}
+
+func applyRollout(_ context.Context, rollout *rolloutResource) (string, string) {
+	return "running", fmt.Sprintf("applied version %s", rollout.Spec.Version)
+}
+
+func matchesSelector(labels, selector map[string]string) bool {
+	if len(selector) == 0 {
+		return true
 	}
-
-	cmd := exec.CommandContext(ctx, cmdParts[0], cmdParts[1:]...)
-	output, err := cmd.CombinedOutput()
-	cleaned := strings.TrimSpace(string(bytes.TrimSpace(output)))
-
-	if err != nil {
-		if cleaned == "" {
-			cleaned = err.Error()
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
 		}
-		return "error", cleaned
 	}
-
-	if cleaned == "" {
-		cleaned = "command completed"
-	}
-
-	return "running", cleaned
+	return true
 }
 
 func postStatus(ctx context.Context, client *http.Client, report statusReport) error {
@@ -247,19 +265,20 @@ func postStatus(ctx context.Context, client *http.Client, report statusReport) e
 	return fmt.Errorf("unable to post status after retries")
 }
 
-func postRolloutStatus(ctx context.Context, client *http.Client, generationID int64, deviceID, state, message string) error {
+func postRolloutStatus(ctx context.Context, client *http.Client, deviceType string, rollout *rolloutResource, deviceID, state, message string) error {
 	payload, err := json.Marshal(map[string]interface{}{
-		"deviceId":     deviceID,
-		"generationId": generationID,
-		"state":        state,
-		"message":      message,
+		"deviceId":   deviceID,
+		"generation": rollout.Status.Generation,
+		"state":      state,
+		"message":    message,
 	})
 	if err != nil {
 		return err
 	}
 
+	url := rolloutStatusURL(deviceType, rollout.Name)
 	for attempt := 1; attempt <= 3; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, rolloutStatusURL, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
 			return err
 		}
