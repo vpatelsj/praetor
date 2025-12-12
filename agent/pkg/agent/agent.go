@@ -25,16 +25,16 @@ type Agent struct {
 	labels     map[string]string
 	managerURL *url.URL
 
-	httpClient      *http.Client
-	pollInterval    time.Duration
-	heartbeatTicker time.Duration
+	httpClient       *http.Client
+	pollInterval     time.Duration
+	heartbeatTicker  time.Duration
 	localGenerations map[string]int64
 
 	logger *log.Logger
 }
 
 // New creates a new Agent instance.
-func New(deviceID, deviceType, managerAddr string, logger *log.Logger) (*Agent, error) {
+func New(deviceID, deviceType, managerAddr string, labels map[string]string, logger *log.Logger) (*Agent, error) {
 	if deviceID == "" {
 		return nil, fmt.Errorf("deviceID is required")
 	}
@@ -52,18 +52,24 @@ func New(deviceID, deviceType, managerAddr string, logger *log.Logger) (*Agent, 
 		logger = log.Default()
 	}
 
+	merged := make(map[string]string)
+	for k, v := range labels {
+		merged[strings.ToLower(k)] = strings.ToLower(v)
+	}
+	if _, ok := merged["role"]; !ok {
+		merged["role"] = strings.ToLower(deviceType)
+	}
+
 	return &Agent{
-		deviceID:        deviceID,
-		deviceType:      strings.ToLower(deviceType),
-		labels: map[string]string{
-			"role": strings.ToLower(deviceType),
-		},
-		managerURL:      parsed,
-		httpClient:      &http.Client{Timeout: 10 * time.Second},
-		pollInterval:    defaultPollInterval,
-		heartbeatTicker: defaultHeartbeatInterval,
+		deviceID:         deviceID,
+		deviceType:       strings.ToLower(deviceType),
+		labels:           merged,
+		managerURL:       parsed,
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		pollInterval:     defaultPollInterval,
+		heartbeatTicker:  defaultHeartbeatInterval,
 		localGenerations: make(map[string]int64),
-		logger:          logger,
+		logger:           logger,
 	}, nil
 }
 
@@ -97,7 +103,7 @@ func (a *Agent) register(ctx context.Context) error {
 	payload := map[string]interface{}{
 		"deviceId":   a.deviceID,
 		"deviceType": a.deviceType,
-		"labels":      a.labels,
+		"labels":     a.labels,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

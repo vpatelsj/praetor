@@ -16,16 +16,23 @@ const deviceType = "simulator"
 func main() {
 	var deviceID string
 	var managerAddr string
+	var labelFlags agent.LabelsFlag
 
 	flag.StringVar(&deviceID, "device-id", getenv("DEVICE_ID"), "Unique device identifier")
 	flag.StringVar(&managerAddr, "manager-address", getenvOrDefault("MANAGER_ADDRESS", "http://manager:8080"), "Praetor manager address")
+	flag.Var(&labelFlags, "label", "Label in key=value form (repeatable)")
 	flag.Parse()
 
 	if deviceID == "" {
 		log.Fatal("--device-id or DEVICE_ID is required")
 	}
 
-	ag, err := agent.New(deviceID, deviceType, managerAddr, log.Default())
+	labels, err := labelFlags.Map()
+	if err != nil {
+		log.Fatalf("invalid label: %v", err)
+	}
+
+	ag, err := agent.New(deviceID, deviceType, managerAddr, labels, log.Default())
 	if err != nil {
 		log.Fatalf("failed to init agent: %v", err)
 	}
