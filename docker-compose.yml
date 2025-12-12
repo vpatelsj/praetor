@@ -9,107 +9,71 @@ services:
   # Servers
   server1:
     build: ./agent
-    environment:
-      - DEVICE_ID=server1
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=Server
+    command: ["praetor-agent-server", "--device-id=server1", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
   server2:
     build: ./agent
-    environment:
-      - DEVICE_ID=server2
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=Server
+    command: ["praetor-agent-server", "--device-id=server2", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
 
   # Network Switches
   switch1:
     build: ./agent
-    environment:
-      - DEVICE_ID=switch1
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=NetworkSwitch
+    command: ["praetor-agent-switch", "--device-id=switch1", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
   switch2:
     build: ./agent
-    environment:
-      - DEVICE_ID=switch2
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=NetworkSwitch
+    command: ["praetor-agent-switch", "--device-id=switch2", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
 
   # DPUs
   dpu1:
     build: ./agent
-    environment:
-      - DEVICE_ID=dpu1
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=DPU
+    command: ["praetor-agent-dpu", "--device-id=dpu1", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
   dpu2:
     build: ./agent
-    environment:
-      - DEVICE_ID=dpu2
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=DPU
+    command: ["praetor-agent-dpu", "--device-id=dpu2", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
 
   # SOCs
   soc1:
     build: ./agent
-    environment:
-      - DEVICE_ID=soc1
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=SOC
+    command: ["praetor-agent-soc", "--device-id=soc1", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
   soc2:
     build: ./agent
-    environment:
-      - DEVICE_ID=soc2
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=SOC
+    command: ["praetor-agent-soc", "--device-id=soc2", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
 
   # BMCs
   bmc1:
     build: ./agent
-    environment:
-      - DEVICE_ID=bmc1
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=BMC
+    command: ["praetor-agent-bmc", "--device-id=bmc1", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
   bmc2:
     build: ./agent
-    environment:
-      - DEVICE_ID=bmc2
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=BMC
+    command: ["praetor-agent-bmc", "--device-id=bmc2", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
 
   # Simulators
   sim1:
     build: ./agent
-    environment:
-      - DEVICE_ID=sim1
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=Simulator
+    command: ["praetor-agent-simulator", "--device-id=sim1", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
   sim2:
     build: ./agent
-    environment:
-      - DEVICE_ID=sim2
-      - AGENT_VERSION=1.0.0
-      - DEVICE_TYPE=Simulator
+    command: ["praetor-agent-simulator", "--device-id=sim2", "--manager-address=http://manager:8080"]
     depends_on:
       - manager
