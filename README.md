@@ -4,7 +4,7 @@ Praetor is a Go-based device-management simulation with a manager service and po
 
 ## Project layout
 - `manager/`: HTTP manager tracking registration, status, rollouts, heartbeats, and selector-based targeting.
-- `agent/`: Lightweight agent that registers, polls typed rollouts, executes commands, reports status, and heartbeats.
+- `agent/`: Shared agent logic (`pkg/agent`) plus per-device entrypoints in `cmd/praetor-agent-*`.
 - `praectl/`: CLI for creating/listing rollouts and querying devices.
 - `docker-compose.yml`: Single compose file that builds the manager and a multi-device fleet of agents.
 
@@ -32,11 +32,11 @@ Legacy endpoints like `/rollout`, `/desired`, and non-typed rollout routes have 
 Supported types: `switch`, `dpu`, `soc`, `bmc`, `server`, `simulator`.
 Agents register with labels `{rack: "demo", role: <per-type default>}` and capabilities per type. Rollout selectors match against these labels; an empty selector targets all devices of that type.
 
-## Agent behavior (default agent image)
-- Env: `DEVICE_ID` (required), `DEVICE_TYPE` (default `Simulator`), `AGENT_VERSION` (default `1.0.0`).
-- Registers on startup, sends heartbeats every 5s, polls typed rollouts every 2s.
-- When targeted by a rollout in Planned/Running state and matching selector, runs the command (or no-op message), posts `/status` and rollout status (`Succeeded`/`Failed`).
-- Skips rollouts where it is already updated or marked failed.
+## Agent behavior (per-device binaries)
+- Per-device entrypoints: `praetor-agent-switch`, `praetor-agent-dpu`, `praetor-agent-soc`, `praetor-agent-bmc`, `praetor-agent-server`, `praetor-agent-simulator`.
+- Flags/env: `--device-id` (or `DEVICE_ID`) and `--manager-address` (default `http://manager:8080`, overridable via `MANAGER_ADDRESS`).
+- Registers on startup, sends heartbeats every 5s, polls typed rollouts every 5s using the device type baked into each binary.
+- When targeted by a rollout in Running state and matching selector, runs the command (or no-op message), posts rollout status (`Succeeded`/`Failed`), and tracks applied generations locally.
 
 ## CLI (praectl)
 From `praectl/` you can run directly or build/install.
