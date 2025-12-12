@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  manager:
+    build: ./manager
+    ports:
+      - "8080:8080"
+
+  # Switches rack1
+  switch1:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch1", "--manager-address=http://manager:8080", "--label=rack=rack1", "--label=site=dc1"]
+    depends_on: [manager]
+  switch2:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch2", "--manager-address=http://manager:8080", "--label=rack=rack1", "--label=site=dc1"]
+    depends_on: [manager]
+  switch3:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch3", "--manager-address=http://manager:8080", "--label=rack=rack1", "--label=site=dc1"]
+    depends_on: [manager]
+  switch4:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch4", "--manager-address=http://manager:8080", "--label=rack=rack1", "--label=site=dc1"]
+    depends_on: [manager]
+  switch5:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch5", "--manager-address=http://manager:8080", "--label=rack=rack1", "--label=site=dc1"]
+    depends_on: [manager]
+
+  # Switches rack2
+  switch6:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch6", "--manager-address=http://manager:8080", "--label=rack=rack2", "--label=site=dc1"]
+    depends_on: [manager]
+  switch7:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch7", "--manager-address=http://manager:8080", "--label=rack=rack2", "--label=site=dc1"]
+    depends_on: [manager]
+  switch8:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch8", "--manager-address=http://manager:8080", "--label=rack=rack2", "--label=site=dc1"]
+    depends_on: [manager]
+  switch9:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch9", "--manager-address=http://manager:8080", "--label=rack=rack2", "--label=site=dc1"]
+    depends_on: [manager]
+  switch10:
+    build: ./agent
+    command: ["praetor-agent-switch", "--device-id=switch10", "--manager-address=http://manager:8080", "--label=rack=rack2", "--label=site=dc1"]
+    depends_on: [manager]
+
+
+
+# Scenario 1 spins up one Praetor manager and ten switch agents in Docker Compose. 
+# Switches 1–5 belong to rack1, switches 6–10 belong to rack2, 
+# and all are tagged with site=dc1 (each agent also self-labels role=switch). 
+# With these labels, you can target rollouts to rack1, rack2, or all switches.
+
+
+# praectl get devices --type switch
+# praectl describe device switch switch3
+# praectl rollout create switch upgrade-switches-rack1 --version 0.1 --selector rack=rack1 --command 'echo rack1 upgrade'
+# praectl rollout watch switch upgrade-switches-rack1
+# praectl rollout list
