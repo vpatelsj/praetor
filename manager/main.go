@@ -211,6 +211,11 @@ func (s *Server) handleDesired(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
+	// Only handle GET for exact /rollout path (list all rollouts)
+	if r.Method == http.MethodGet && r.URL.Path == "/rollout" {
+		s.handleListRollouts(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -267,6 +272,21 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(gen); err != nil {
 		http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleListRollouts(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	rollouts := make([]*Generation, 0, len(generations))
+	for _, gen := range generations {
+		rollouts = append(rollouts, gen)
+	}
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(rollouts); err != nil {
+		http.Error(w, "failed to encode rollouts", http.StatusInternalServerError)
 		return
 	}
 }
