@@ -1,7 +1,10 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /src
 ENV CGO_ENABLED=0
+COPY go.mod .
 COPY main.go .
+COPY pkg/ ./pkg/
+COPY controllers/ ./controllers/
 RUN go build -o /out/manager main.go
 
 FROM alpine:3.20

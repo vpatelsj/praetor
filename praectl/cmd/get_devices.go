@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -12,12 +14,19 @@ var getCmd = &cobra.Command{
 	Short: "Display Praetor resources",
 }
 
+var (
+	getDevicesType string
+)
+
 var getDevicesCmd = &cobra.Command{
 	Use:   "devices",
 	Short: "List registered devices",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if getDevicesType == "" {
+			return fmt.Errorf("--type is required (e.g. --type switch)")
+		}
 		c := newClient()
-		devices, err := c.GetDevices(cmd.Context())
+		devices, err := c.GetDevicesByType(cmd.Context(), strings.ToLower(getDevicesType))
 		if err != nil {
 			return err
 		}
@@ -28,16 +37,13 @@ var getDevicesCmd = &cobra.Command{
 		}
 
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "DEVICE ID\tTYPE\tONLINE\tSELECTED\tAGENT VERSION\tREPORTED VERSION\tSTATE")
+		fmt.Fprintln(tw, "DEVICE ID\tTYPE\tONLINE\tLAST SEEN")
 		for _, d := range devices {
-			fmt.Fprintf(tw, "%s\t%s\t%t\t%t\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%t\t%s\n",
 				d.ID,
-				d.Type,
+				d.DeviceType,
 				d.Online,
-				d.Selected,
-				valueOrDash(d.AgentVersion),
-				valueOrDash(d.Version),
-				valueOrDash(d.State),
+				d.LastSeen.Format(time.RFC3339),
 			)
 		}
 		return tw.Flush()
@@ -47,4 +53,5 @@ var getDevicesCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(getCmd)
 	getCmd.AddCommand(getDevicesCmd)
+	getDevicesCmd.Flags().StringVar(&getDevicesType, "type", "", "Device type to query (switch, dpu, soc, bmc)")
 }

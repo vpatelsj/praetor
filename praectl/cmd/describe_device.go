@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,30 +15,23 @@ var describeCmd = &cobra.Command{
 }
 
 var describeDeviceCmd = &cobra.Command{
-	Use:   "device <id>",
+	Use:   "device <deviceType> <id>",
 	Short: "Describe a single device",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		deviceID := args[0]
+		deviceType := strings.ToLower(args[0])
+		deviceID := args[1]
 		c := newClient()
 
-		device, err := c.GetDevice(cmd.Context(), deviceID)
+		device, err := c.GetDeviceByType(cmd.Context(), deviceType, deviceID)
 		if err != nil {
 			return err
 		}
 
 		fmt.Printf("ID:\t%s\n", device.ID)
-		fmt.Printf("Type:\t%s\n", device.Type)
+		fmt.Printf("Type:\t%s\n", device.DeviceType)
 		fmt.Printf("Online:\t%t\n", device.Online)
-		fmt.Printf("Selected:\t%t\n", device.Selected)
-		fmt.Printf("Agent Version:\t%s\n", valueOrDash(device.AgentVersion))
-		fmt.Printf("Reported Version:\t%s\n", valueOrDash(device.Version))
-		fmt.Printf("State:\t%s\n", valueOrDash(device.State))
-		if device.Message != "" {
-			fmt.Printf("Message:\t%s\n", device.Message)
-		}
-		fmt.Printf("Registered:\t%s\n", formatTime(device.RegisteredAt))
-		fmt.Printf("Last Seen:\t%s\n", formatTime(device.LastSeen))
+		fmt.Printf("Last Seen:\t%s\n", device.LastSeen.Format(time.RFC3339))
 
 		if len(device.Labels) > 0 {
 			fmt.Println("Labels:")
@@ -46,15 +40,6 @@ var describeDeviceCmd = &cobra.Command{
 			}
 		} else {
 			fmt.Println("Labels: <none>")
-		}
-
-		if len(device.Capabilities) > 0 {
-			fmt.Println("Capabilities:")
-			for _, cap := range device.Capabilities {
-				fmt.Printf("  - %s\n", cap)
-			}
-		} else {
-			fmt.Println("Capabilities: <none>")
 		}
 
 		return nil
@@ -73,11 +58,4 @@ func renderSortedMap(m map[string]string) []string {
 	}
 	sort.Strings(pairs)
 	return pairs
-}
-
-func formatTime(t *time.Time) string {
-	if t == nil || t.IsZero() {
-		return "unknown"
-	}
-	return t.Format(time.RFC3339)
 }
