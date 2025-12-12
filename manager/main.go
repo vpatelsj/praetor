@@ -276,11 +276,42 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func cloneGeneration(gen *Generation) *Generation {
+	updated := make(map[string]bool, len(gen.UpdatedDevices))
+	for deviceID, updatedState := range gen.UpdatedDevices {
+		updated[deviceID] = updatedState
+	}
+
+	failed := make(map[string]string, len(gen.FailedDevices))
+	for deviceID, message := range gen.FailedDevices {
+		failed[deviceID] = message
+	}
+
+	matchLabels := make(map[string]string, len(gen.Selector.MatchLabels))
+	for key, value := range gen.Selector.MatchLabels {
+		matchLabels[key] = value
+	}
+
+	return &Generation{
+		ID:              gen.ID,
+		Version:         gen.Version,
+		Selector:        Selector{MatchLabels: matchLabels},
+		CreatedAt:       gen.CreatedAt,
+		State:           gen.State,
+		UpdatedDevices:  updated,
+		FailedDevices:   failed,
+		TotalTargets:    gen.TotalTargets,
+		SuccessCount:    gen.SuccessCount,
+		FailureCount:    gen.FailureCount,
+		MaxFailureRatio: gen.MaxFailureRatio,
+	}
+}
+
 func (s *Server) handleListRollouts(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	rollouts := make([]*Generation, 0, len(generations))
 	for _, gen := range generations {
-		rollouts = append(rollouts, gen)
+		rollouts = append(rollouts, cloneGeneration(gen))
 	}
 	s.mu.Unlock()
 
