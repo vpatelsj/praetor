@@ -68,6 +68,14 @@ type CreateRolloutRequest struct {
 	Command     []string          `json:"command"`
 }
 
+// UpdateRolloutRequest carries update parameters.
+type UpdateRolloutRequest struct {
+	Version     string            `json:"version"`
+	Command     []string          `json:"command"`
+	Selector    map[string]string `json:"selector"`
+	MaxFailures float64           `json:"maxFailures"`
+}
+
 // CreateRollout creates a rollout for the given device type.
 func (c *PraetorClient) CreateRollout(ctx context.Context, deviceType, name string, req CreateRolloutRequest) (*Rollout, error) {
 	if name == "" {
@@ -83,6 +91,25 @@ func (c *PraetorClient) CreateRollout(ctx context.Context, deviceType, name stri
 	path := fmt.Sprintf("/api/v1/devicetypes/%s/rollouts", deviceType)
 	var rollout Rollout
 	if err := c.do(ctx, http.MethodPost, path, payload, &rollout); err != nil {
+		return nil, err
+	}
+	return &rollout, nil
+}
+
+// UpdateRollout updates a rollout spec and bumps its generation.
+func (c *PraetorClient) UpdateRollout(ctx context.Context, deviceType, name string, req UpdateRolloutRequest) (*Rollout, error) {
+	if name == "" {
+		return nil, fmt.Errorf("rollout name is required")
+	}
+	payload := map[string]interface{}{
+		"version":     req.Version,
+		"command":     req.Command,
+		"selector":    req.Selector,
+		"maxFailures": req.MaxFailures,
+	}
+	path := fmt.Sprintf("/api/v1/devicetypes/%s/rollouts/%s", deviceType, url.PathEscape(name))
+	var rollout Rollout
+	if err := c.do(ctx, http.MethodPatch, path, payload, &rollout); err != nil {
 		return nil, err
 	}
 	return &rollout, nil

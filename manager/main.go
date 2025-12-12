@@ -396,12 +396,17 @@ func (s *Server) handleDeviceTypeRollouts(w http.ResponseWriter, r *http.Request
 
 	name := remaining[0]
 	if len(remaining) == 1 {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			s.respondWithRollout(w, deviceType, name)
+			return
+		case http.MethodPatch:
+			s.updateRolloutForTypeAndName(w, r, deviceType, name)
+			return
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.respondWithRollout(w, deviceType, name)
-		return
 	}
 
 	if len(remaining) == 2 && remaining[1] == "status" && r.Method == http.MethodPost {
@@ -534,6 +539,63 @@ func (s *Server) createRolloutForType(w http.ResponseWriter, r *http.Request, de
 	}
 }
 
+func (s *Server) updateRolloutForTypeAndName(w http.ResponseWriter, r *http.Request, deviceType types.DeviceType, name string) {
+	type rolloutUpdateRequest struct {
+		Version     string            `json:"version"`
+		Command     []string          `json:"command"`
+		Selector    map[string]string `json:"selector"`
+		MaxFailures float64           `json:"maxFailures"`
+	}
+	var req rolloutUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Version == "" {
+		http.Error(w, "version is required", http.StatusBadRequest)
+		return
+	}
+	if req.Selector == nil {
+		req.Selector = map[string]string{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rollout, ok := rolloutsByType[deviceType][name]
+	if !ok {
+		http.Error(w, "rollout not found", http.StatusNotFound)
+		return
+	}
+
+	if rolloutSpecEqual(rollout.Spec, req.Version, req.Command, req.Selector, req.MaxFailures) {
+		if err := json.NewEncoder(w).Encode(cloneRollout(rollout)); err != nil {
+			http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	rollout.Spec.Version = req.Version
+	rollout.Spec.Command = append([]string(nil), req.Command...)
+	rollout.Spec.Selector = copySelector(req.Selector)
+	rollout.Spec.MaxFailures = req.MaxFailures
+
+	rollout.Status.Generation++
+	rollout.Status.ObservedGeneration = 0
+	rollout.Status.UpdatedDevices = make(map[string]bool)
+	rollout.Status.FailedDevices = make(map[string]string)
+	rollout.Status.TotalTargets = 0
+	rollout.Status.SuccessCount = 0
+	rollout.Status.FailureCount = 0
+	rollout.Status.State = "Planned"
+
+	if err := json.NewEncoder(w).Encode(cloneRollout(rollout)); err != nil {
+		http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
+		return
+	}
+}
+
 func (s *Server) updateRolloutStatusForType(w http.ResponseWriter, r *http.Request, deviceType types.DeviceType, name string) {
 	type rolloutStatusUpdate struct {
 		DeviceID   string `json:"deviceId"`
@@ -618,6 +680,46 @@ func copySelector(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	return copyStringMap(m)
+}
+
+func rolloutSpecEqual(spec model.RolloutSpec, version string, command []string, selector map[string]string, maxFailures float64) bool {
+	if spec.Version != version {
+		return false
+	}
+	if spec.MaxFailures != maxFailures {
+		return false
+	}
+	if !stringSliceEqual(spec.Command, command) {
+		return false
+	}
+	if !stringMapEqual(spec.Selector, selector) {
+		return false
+	}
+	return true
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func copyStringMap(m map[string]string) map[string]string {
