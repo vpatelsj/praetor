@@ -1,0 +1,9 @@
+apiVersion: azure.com/v1alpha1
+kind: DeviceProcessDeployment
+metadata:
+  name: sample-deviceprocessdeployment
+spec:
+  selector:
+    rack: rack1
+  template:
+    command: echo "apply firmware"

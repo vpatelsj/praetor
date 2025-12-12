@@ -1,0 +1,6 @@
+apiVersion: azure.com/v1alpha1
+kind: DeviceProcess
+metadata:
+  name: sample-deviceprocess
+spec:
+  command: echo "hello from device"
