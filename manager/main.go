@@ -211,6 +211,11 @@ func (s *Server) handleDesired(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
+	// Only handle GET for exact /rollout path (list all rollouts)
+	if r.Method == http.MethodGet && r.URL.Path == "/rollout" {
+		s.handleListRollouts(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -267,6 +272,52 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(gen); err != nil {
 		http.Error(w, "failed to encode rollout", http.StatusInternalServerError)
+		return
+	}
+}
+
+func cloneGeneration(gen *Generation) *Generation {
+	updated := make(map[string]bool, len(gen.UpdatedDevices))
+	for deviceID, updatedState := range gen.UpdatedDevices {
+		updated[deviceID] = updatedState
+	}
+
+	failed := make(map[string]string, len(gen.FailedDevices))
+	for deviceID, message := range gen.FailedDevices {
+		failed[deviceID] = message
+	}
+
+	matchLabels := make(map[string]string, len(gen.Selector.MatchLabels))
+	for key, value := range gen.Selector.MatchLabels {
+		matchLabels[key] = value
+	}
+
+	return &Generation{
+		ID:              gen.ID,
+		Version:         gen.Version,
+		Selector:        Selector{MatchLabels: matchLabels},
+		CreatedAt:       gen.CreatedAt,
+		State:           gen.State,
+		UpdatedDevices:  updated,
+		FailedDevices:   failed,
+		TotalTargets:    gen.TotalTargets,
+		SuccessCount:    gen.SuccessCount,
+		FailureCount:    gen.FailureCount,
+		MaxFailureRatio: gen.MaxFailureRatio,
+	}
+}
+
+func (s *Server) handleListRollouts(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	rollouts := make([]*Generation, 0, len(generations))
+	for _, gen := range generations {
+		rollouts = append(rollouts, cloneGeneration(gen))
+	}
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(rollouts); err != nil {
+		http.Error(w, "failed to encode rollouts", http.StatusInternalServerError)
 		return
 	}
 }
