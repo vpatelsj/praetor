@@ -9,7 +9,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
-.PHONY: all fmt vet test generate manifests build tools kind-image kind-load kind-deploy kind-restart
+.PHONY: all fmt vet test generate manifests build tools kind-image kind-load kind-deploy kind-restart kind-clean
 
 all: fmt vet test build
 
@@ -58,3 +58,7 @@ kind-deploy: kind-load
 
 # Delete and recreate deployment using the current image (same as kind-deploy)
 kind-restart: kind-deploy
+
+# Delete all deployed resources from the default kustomize overlay
+kind-clean:
+	kubectl delete -k config/default --ignore-not-found
