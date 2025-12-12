@@ -197,7 +197,7 @@ func (a *Agent) pollRollouts(ctx context.Context) error {
 		if !strings.EqualFold(r.Status.State, "running") {
 			continue
 		}
-		if !matchesSelector(a.labels, r.Spec.Selector) {
+		if !matchesSelector(a.deviceID, a.labels, r.Spec.Selector) {
 			continue
 		}
 		if r.Status.Generation <= a.localGenerations[r.Name] {
@@ -223,6 +223,8 @@ func (a *Agent) executeRollout(ctx context.Context, r Rollout) (string, string) 
 	if len(cmdParts) == 0 {
 		cmdParts = []string{"echo", fmt.Sprintf("Applying version %s", r.Spec.Version)}
 	}
+
+	a.logger.Printf("rollout %s generation %d executing: %q", r.Name, r.Status.Generation, strings.Join(cmdParts, " "))
 
 	cmd := exec.CommandContext(ctx, cmdParts[0], cmdParts[1:]...)
 	output, err := cmd.CombinedOutput()
@@ -293,13 +295,21 @@ type RolloutStatus struct {
 	TotalTargets int    `json:"totalTargets"`
 }
 
-func matchesSelector(labels, selector map[string]string) bool {
+func matchesSelector(deviceID string, labels, selector map[string]string) bool {
 	if len(selector) == 0 {
 		return true
 	}
 	for k, v := range selector {
-		if labels[k] != v {
-			return false
+		key := strings.ToLower(k)
+		switch key {
+		case "deviceid", "device-id", "id":
+			if !strings.EqualFold(deviceID, v) {
+				return false
+			}
+		default:
+			if labels[key] != v {
+				return false
+			}
 		}
 	}
 	return true
