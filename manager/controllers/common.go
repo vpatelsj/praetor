@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"log"
+	"strings"
 
 	"manager/pkg/model"
 	"manager/pkg/types"
@@ -82,8 +83,16 @@ func matchesSelector(device *model.Device, selector map[string]string) bool {
 		return true
 	}
 	for k, v := range selector {
-		if device.Labels[k] != v {
-			return false
+		key := strings.ToLower(k)
+		switch key {
+		case "deviceid", "device-id", "id":
+			if !strings.EqualFold(device.ID, v) {
+				return false
+			}
+		default:
+			if device.Labels[key] != v {
+				return false
+			}
 		}
 	}
 	return true

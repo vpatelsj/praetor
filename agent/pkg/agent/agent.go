@@ -25,16 +25,16 @@ type Agent struct {
 	labels     map[string]string
 	managerURL *url.URL
 
-	httpClient      *http.Client
-	pollInterval    time.Duration
-	heartbeatTicker time.Duration
+	httpClient       *http.Client
+	pollInterval     time.Duration
+	heartbeatTicker  time.Duration
 	localGenerations map[string]int64
 
 	logger *log.Logger
 }
 
 // New creates a new Agent instance.
-func New(deviceID, deviceType, managerAddr string, logger *log.Logger) (*Agent, error) {
+func New(deviceID, deviceType, managerAddr string, labels map[string]string, logger *log.Logger) (*Agent, error) {
 	if deviceID == "" {
 		return nil, fmt.Errorf("deviceID is required")
 	}
@@ -52,18 +52,24 @@ func New(deviceID, deviceType, managerAddr string, logger *log.Logger) (*Agent, 
 		logger = log.Default()
 	}
 
+	merged := make(map[string]string)
+	for k, v := range labels {
+		merged[strings.ToLower(k)] = strings.ToLower(v)
+	}
+	if _, ok := merged["role"]; !ok {
+		merged["role"] = strings.ToLower(deviceType)
+	}
+
 	return &Agent{
-		deviceID:        deviceID,
-		deviceType:      strings.ToLower(deviceType),
-		labels: map[string]string{
-			"role": strings.ToLower(deviceType),
-		},
-		managerURL:      parsed,
-		httpClient:      &http.Client{Timeout: 10 * time.Second},
-		pollInterval:    defaultPollInterval,
-		heartbeatTicker: defaultHeartbeatInterval,
+		deviceID:         deviceID,
+		deviceType:       strings.ToLower(deviceType),
+		labels:           merged,
+		managerURL:       parsed,
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		pollInterval:     defaultPollInterval,
+		heartbeatTicker:  defaultHeartbeatInterval,
 		localGenerations: make(map[string]int64),
-		logger:          logger,
+		logger:           logger,
 	}, nil
 }
 
@@ -97,7 +103,7 @@ func (a *Agent) register(ctx context.Context) error {
 	payload := map[string]interface{}{
 		"deviceId":   a.deviceID,
 		"deviceType": a.deviceType,
-		"labels":      a.labels,
+		"labels":     a.labels,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -191,7 +197,7 @@ func (a *Agent) pollRollouts(ctx context.Context) error {
 		if !strings.EqualFold(r.Status.State, "running") {
 			continue
 		}
-		if !matchesSelector(a.labels, r.Spec.Selector) {
+		if !matchesSelector(a.deviceID, a.labels, r.Spec.Selector) {
 			continue
 		}
 		if r.Status.Generation <= a.localGenerations[r.Name] {
@@ -217,6 +223,8 @@ func (a *Agent) executeRollout(ctx context.Context, r Rollout) (string, string) 
 	if len(cmdParts) == 0 {
 		cmdParts = []string{"echo", fmt.Sprintf("Applying version %s", r.Spec.Version)}
 	}
+
+	a.logger.Printf("rollout %s generation %d executing: %q", r.Name, r.Status.Generation, strings.Join(cmdParts, " "))
 
 	cmd := exec.CommandContext(ctx, cmdParts[0], cmdParts[1:]...)
 	output, err := cmd.CombinedOutput()
@@ -287,13 +295,21 @@ type RolloutStatus struct {
 	TotalTargets int    `json:"totalTargets"`
 }
 
-func matchesSelector(labels, selector map[string]string) bool {
+func matchesSelector(deviceID string, labels, selector map[string]string) bool {
 	if len(selector) == 0 {
 		return true
 	}
 	for k, v := range selector {
-		if labels[k] != v {
-			return false
+		key := strings.ToLower(k)
+		switch key {
+		case "deviceid", "device-id", "id":
+			if !strings.EqualFold(deviceID, v) {
+				return false
+			}
+		default:
+			if labels[key] != v {
+				return false
+			}
 		}
 	}
 	return true
