@@ -65,6 +65,7 @@ type CreateRolloutRequest struct {
 	Version     string            `json:"version"`
 	Selector    map[string]string `json:"selector"`
 	MaxFailures float64           `json:"maxFailures"`
+	Command     []string          `json:"command"`
 }
 
 // CreateRollout creates a rollout for the given device type.
@@ -75,6 +76,7 @@ func (c *PraetorClient) CreateRollout(ctx context.Context, deviceType, name stri
 	payload := map[string]interface{}{
 		"name":        name,
 		"version":     req.Version,
+		"command":     req.Command,
 		"selector":    req.Selector,
 		"maxFailures": req.MaxFailures,
 	}

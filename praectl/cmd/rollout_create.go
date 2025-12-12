@@ -13,6 +13,7 @@ var (
 	rolloutVersion      string
 	rolloutSelectors    []string
 	rolloutMaxFailRatio float64
+	rolloutCommand      string
 )
 
 var rolloutCreateCmd = &cobra.Command{
@@ -27,9 +28,15 @@ var rolloutCreateCmd = &cobra.Command{
 			return err
 		}
 
+		var cmdParts []string
+		if rolloutCommand != "" {
+			cmdParts = strings.Fields(rolloutCommand)
+		}
+
 		c := newClient()
 		created, err := c.CreateRollout(cmd.Context(), deviceType, name, client.CreateRolloutRequest{
 			Version:     rolloutVersion,
+			Command:     cmdParts,
 			Selector:    labels,
 			MaxFailures: rolloutMaxFailRatio,
 		})
@@ -50,6 +57,7 @@ var rolloutCreateCmd = &cobra.Command{
 func init() {
 	rolloutCmd.AddCommand(rolloutCreateCmd)
 	rolloutCreateCmd.Flags().StringVar(&rolloutVersion, "version", "", "Rollout version to deploy")
+	rolloutCreateCmd.Flags().StringVar(&rolloutCommand, "command", "", "Command to run during rollout (optional; agents fall back to defaults when omitted)")
 	rolloutCreateCmd.Flags().StringArrayVar(&rolloutSelectors, "selector", nil, "Label selector in key=value form (repeatable)")
 	rolloutCreateCmd.Flags().Float64Var(&rolloutMaxFailRatio, "max-failures", 0.3, "Maximum acceptable failure ratio before pausing the rollout")
 	rolloutCreateCmd.MarkFlagRequired("version")

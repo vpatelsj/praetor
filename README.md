@@ -45,6 +45,10 @@ Create a rollout (per type):
 ```sh
 go run . rollout create switch switch-r3 --version v3.2.0 --selector rack=demo --selector role=switch --max-failures 0.1
 ```
+Create a rollout with an explicit command (space-split; avoid nested quotes):
+```sh
+go run . rollout create switch upgrade-switch-agent-v3 --version v1.4.3 --selector role=switch --max-failures 0.05 --command "echo applied v1.4.3"
+```
 
 List rollouts:
 - All types: `go run . rollout list`

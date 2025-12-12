@@ -113,6 +113,7 @@ func cloneRollout(src *model.Rollout) *model.Rollout {
 		CreatedAt:  src.CreatedAt,
 		Spec: model.RolloutSpec{
 			Version:     src.Spec.Version,
+			Command:     append([]string(nil), src.Spec.Command...),
 			Selector:    copySelector(src.Spec.Selector),
 			MaxFailures: src.Spec.MaxFailures,
 		},
@@ -477,6 +478,7 @@ func (s *Server) createRolloutForType(w http.ResponseWriter, r *http.Request, de
 	type createRolloutRequest struct {
 		Name        string            `json:"name"`
 		Version     string            `json:"version"`
+		Command     []string          `json:"command"`
 		Selector    map[string]string `json:"selector"`
 		MaxFailures float64           `json:"maxFailures"`
 	}
@@ -510,6 +512,7 @@ func (s *Server) createRolloutForType(w http.ResponseWriter, r *http.Request, de
 		CreatedAt:  now,
 		Spec: model.RolloutSpec{
 			Version:     req.Version,
+			Command:     append([]string(nil), req.Command...),
 			Selector:    copySelector(req.Selector),
 			MaxFailures: req.MaxFailures,
 		},

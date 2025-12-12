@@ -26,6 +26,7 @@ type DeviceStatus struct {
 // RolloutSpec defines desired rollout state.
 type RolloutSpec struct {
 	Version     string            `json:"version"`
+	Command     []string          `json:"command"`
 	Selector    map[string]string `json:"selector"`
 	MaxFailures float64           `json:"maxFailures"`
 }
