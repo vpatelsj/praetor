@@ -1,8 +1,13 @@
 SHELL := /bin/bash
 
 CONTROLLER_GEN := $(shell go env GOPATH)/bin/controller-gen
+CONTROLLER_GEN_VERSION ?= v0.14.0
 IMAGE ?= apollo-deviceprocess-controller:dev
 KIND_CLUSTER ?= apollo-dev
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
+LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
 .PHONY: all fmt vet test generate manifests build tools kind-image kind-load kind-deploy kind-restart
 
@@ -20,22 +25,21 @@ test:
 tools: $(CONTROLLER_GEN)
 
 $(CONTROLLER_GEN):
-	cd /home/vapa/apollo/praetor && GOTOOLCHAIN=go1.22.10 go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
 # Generate deepcopy and object code.
 generate: tools
 	$(CONTROLLER_GEN) object paths=./api/...
 
-# Generate CRDs and RBAC manifests into config/.
+# Generate CRDs into config/.
 manifests: tools
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd \
+	$(CONTROLLER_GEN) crd \
 		paths=./api/... \
-		output:crd:artifacts:config=config/crd/bases \
-		output:rbac:artifacts:config=config/rbac
+		output:crd:artifacts:config=config/crd/bases
 
 build:
-	GO111MODULE=on go build -o bin/apollo-deviceprocess-controller ./controller
-	GO111MODULE=on go build -o bin/apollo-deviceprocess-agent ./agent
+	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-controller ./controller
+	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-agent ./agent
 
 # Build controller container image (local)
 kind-image:
