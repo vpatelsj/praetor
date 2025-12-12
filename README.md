@@ -48,25 +48,25 @@ go build -o praectl .
 ### 3) Create a rollout
 Targets a device type with optional label selectors, max failure ratio, and command (space-split).
 ```sh
-go run ./praectl rollout create switch upgrade-switches-v1 \
+praectl rollout create switch upgrade-switches-v1 \
   --version v1.4.3 \
-  --selector rack=demo --selector role=switch \
+  --selector role=switch \
   --max-failures 0.1 \
   --command "echo applying v1.4.3"
 ```
 
 ### 4) Update a rollout (bumps generation)
 ```sh
-go run ./praectl rollout update switch upgrade-switches-v1 \
+praectl rollout update switch upgrade-switches-v1 \
   --version v1.5.0 \
-  --selector rack=demo --selector role=switch \
+  --selector role=switch \
   --max-failures 0.05
 ```
 
 ### 5) List, get, and watch rollouts
-- List all types: `go run ./praectl rollout list`
-- List one type: `go run ./praectl rollout list server`
-- Get details: `go run ./praectl rollout get switch upgrade-switches-v1`
+- List all types: `praectl rollout list`
+- List one type: `praectl rollout list server`
+- Get details: `praectl rollout get switch upgrade-switches-v1`
 - Watch progress (polling): `go run ./praectl rollout watch switch upgrade-switches-v1`
 
 ### 6) Run a standalone agent locally
