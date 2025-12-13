@@ -392,54 +392,63 @@ func (g *Gateway) listDeviceProcesses(ctx context.Context, deviceName string) ([
 }
 
 func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName string, obs Observation, reportedAt *time.Time) error {
-	var proc apiv1alpha1.DeviceProcess
+	const maxAttempts = 3
 	key := types.NamespacedName{Name: obs.Name, Namespace: obs.Namespace}
-	if err := g.client.Get(ctx, key, &proc); err != nil {
-		return err
-	}
 
-	if proc.Spec.DeviceRef.Name != deviceName {
-		return apierrors.NewBadRequest(fmt.Sprintf("device %s not authorized for %s/%s", deviceName, proc.Namespace, proc.Name))
-	}
-
-	before := proc.DeepCopy()
-
-	if proc.Status.Phase == "" {
-		proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
-	}
-
-	connectedChanged := setAgentConnected(&proc.Status, true, connectedReason, connectedMessage)
-	specObservedChanged := false
-	if obs.ObservedSpecHash != "" && proc.Status.ObservedSpecHash != obs.ObservedSpecHash {
-		proc.Status.ObservedSpecHash = obs.ObservedSpecHash
-		msg := fmt.Sprintf("hash=%s", obs.ObservedSpecHash)
-		if reportedAt != nil {
-			msg = fmt.Sprintf("%s reportedAt=%s", msg, reportedAt.UTC().Format(time.RFC3339))
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var proc apiv1alpha1.DeviceProcess
+		if err := g.client.Get(ctx, key, &proc); err != nil {
+			return err
 		}
-		conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecObserved, "SpecObserved", msg)
-		specObservedChanged = true
-	}
 
-	if reflectDeepEqualStatus(before.Status, proc.Status) {
+		if proc.Spec.DeviceRef.Name != deviceName {
+			return apierrors.NewBadRequest(fmt.Sprintf("device %s not authorized for %s/%s", deviceName, proc.Namespace, proc.Name))
+		}
+
+		before := proc.DeepCopy()
+
+		if proc.Status.Phase == "" {
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
+		}
+
+		connectedChanged := setAgentConnected(&proc.Status, true, connectedReason, connectedMessage)
+		specObservedChanged := false
+		if obs.ObservedSpecHash != "" && proc.Status.ObservedSpecHash != obs.ObservedSpecHash {
+			proc.Status.ObservedSpecHash = obs.ObservedSpecHash
+			msg := fmt.Sprintf("hash=%s", obs.ObservedSpecHash)
+			if reportedAt != nil {
+				msg = fmt.Sprintf("%s reportedAt=%s", msg, reportedAt.UTC().Format(time.RFC3339))
+			}
+			conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecObserved, "SpecObserved", msg)
+			specObservedChanged = true
+		}
+
+		if reflectDeepEqualStatus(before.Status, proc.Status) {
+			return nil
+		}
+
+		if err := g.client.Status().Patch(ctx, &proc, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return err
+		}
+
+		if connectedChanged {
+			g.recorder.Event(&proc, corev1.EventTypeNormal, "AgentConnected", fmt.Sprintf("device %s connected", deviceName))
+		}
+		if specObservedChanged {
+			msg := fmt.Sprintf("hash %s", obs.ObservedSpecHash)
+			if reportedAt != nil {
+				msg = fmt.Sprintf("%s at %s", msg, reportedAt.UTC().Format(time.RFC3339))
+			}
+			g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", msg)
+		}
+
 		return nil
 	}
 
-	if err := g.client.Status().Patch(ctx, &proc, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
-		return err
-	}
-
-	if connectedChanged {
-		g.recorder.Event(&proc, corev1.EventTypeNormal, "AgentConnected", fmt.Sprintf("device %s connected", deviceName))
-	}
-	if specObservedChanged {
-		msg := fmt.Sprintf("hash %s", obs.ObservedSpecHash)
-		if reportedAt != nil {
-			msg = fmt.Sprintf("%s at %s", msg, reportedAt.UTC().Format(time.RFC3339))
-		}
-		g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", msg)
-	}
-
-	return nil
+	return apierrors.NewConflict(apiv1alpha1.SchemeGroupVersion.WithResource("deviceprocesses").GroupResource(), obs.Name, fmt.Errorf("status patch conflict after retries"))
 }
 
 func (g *Gateway) markDeviceConnected(ctx context.Context, deviceName string) error {
@@ -613,11 +622,20 @@ func setAgentConnected(status *apiv1alpha1.DeviceProcessStatus, connected bool, 
 		desiredStatus = metav1.ConditionTrue
 	}
 
-	before := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected)
+	var beforeCopy *metav1.Condition
+	if existing := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected); existing != nil {
+		tmp := *existing
+		beforeCopy = &tmp
+	}
+
 	conditions.SetCondition(&status.Conditions, metav1.Condition{Type: string(apiv1alpha1.ConditionAgentConnected), Status: desiredStatus, Reason: reason, Message: message})
 	after := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected)
 
-	return before == nil || after == nil || before.Status != after.Status || before.Reason != after.Reason || before.Message != after.Message
+	if beforeCopy == nil || after == nil {
+		return true
+	}
+
+	return beforeCopy.Status != after.Status || beforeCopy.Reason != after.Reason || beforeCopy.Message != after.Message
 }
 
 func hashSpec(spec *apiv1alpha1.DeviceProcessSpec) string {
