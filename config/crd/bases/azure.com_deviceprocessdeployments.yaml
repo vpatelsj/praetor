@@ -105,6 +105,9 @@ spec:
                       operator is "In", and the values array contains only "value". The requirements are ANDed.
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: NotIn/DoesNotExist matchExpressions are not supported
+                  rule: "!has(self.matchExpressions) || self.matchExpressions.all(me, me.operator != 'NotIn' && me.operator != 'DoesNotExist')"
                 x-kubernetes-map-type: atomic
               template:
                 description: Template describes the DeviceProcess to run on matched

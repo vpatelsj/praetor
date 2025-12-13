@@ -219,7 +219,7 @@ func TestRequestsForNetworkSwitchMatchesSelectors(t *testing.T) {
 		Recorder: record.NewFakeRecorder(10),
 	}
 
-	reqs := reconciler.requestsForNetworkSwitch(context.Background(), switchObj)
+	reqs := reconciler.requestsForNetworkSwitch(context.Background(), switchObj, nil)
 
 	if len(reqs) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(reqs))

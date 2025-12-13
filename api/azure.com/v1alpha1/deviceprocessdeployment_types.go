@@ -66,6 +66,8 @@ type DeviceProcessTemplate struct {
 // DeviceProcessDeploymentSpec defines the desired state for deploying DeviceProcesses.
 type DeviceProcessDeploymentSpec struct {
 	// Selector identifies target devices.
+	// NotIn/DoesNotExist selectors are not supported; use matchLabels or In/Exists.
+	// +kubebuilder:validation:XValidation:rule="!has(self.matchExpressions) || self.matchExpressions.all(me, me.operator != 'NotIn' && me.operator != 'DoesNotExist')",message="NotIn/DoesNotExist matchExpressions are not supported"
 	Selector metav1.LabelSelector `json:"selector"`
 	// UpdateStrategy defines how updates roll out.
 	UpdateStrategy DeviceProcessDeploymentStrategy `json:"updateStrategy,omitempty"`

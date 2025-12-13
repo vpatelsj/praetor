@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +41,8 @@ const (
 	deviceProcessDeploymentUIDKey = "deviceprocessdeployment-uid"
 	selectorKeysIndex             = "selectorKeys"
 )
+
+var errNetworkSwitchUnavailable = errors.New("networkswitch kind unavailable")
 
 //+kubebuilder:rbac:groups=azure.com,resources=deviceprocessdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=azure.com,resources=deviceprocessdeployments/status,verbs=get
@@ -94,9 +98,8 @@ func (r *DeviceProcessDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) e
 				return true
 			}
 			labelsChanged := !reflect.DeepEqual(oldObj.GetLabels(), newObj.GetLabels())
-			annotationsChanged := !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations())
 			generationChanged := oldObj.GetGeneration() != newObj.GetGeneration()
-			return labelsChanged || annotationsChanged || generationChanged
+			return labelsChanged || generationChanged
 		},
 	}
 
@@ -104,22 +107,19 @@ func (r *DeviceProcessDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) e
 		For(&apiv1alpha1.DeviceProcessDeployment{}).
 		Watches(networkSwitch, handler.Funcs{
 			CreateFunc: func(c context.Context, e event.CreateEvent, q workqueue.RateLimitingInterface) {
-				for _, req := range r.requestsForNetworkSwitch(c, e.Object) {
-					q.Add(req)
-				}
+				r.enqueueRequests(c, q, r.requestsForNetworkSwitch(c, e.Object, nil))
 			},
 			UpdateFunc: func(c context.Context, e event.UpdateEvent, q workqueue.RateLimitingInterface) {
-				for _, req := range r.requestsForNetworkSwitch(c, e.ObjectOld) {
-					q.Add(req)
+				changedKeys := changedLabelKeys(e.ObjectOld, e.ObjectNew)
+				if len(changedKeys) == 0 {
+					return
 				}
-				for _, req := range r.requestsForNetworkSwitch(c, e.ObjectNew) {
-					q.Add(req)
-				}
+				reqs := r.requestsForNetworkSwitch(c, e.ObjectOld, changedKeys)
+				reqs = append(reqs, r.requestsForNetworkSwitch(c, e.ObjectNew, changedKeys)...)
+				r.enqueueRequests(c, q, reqs)
 			},
 			DeleteFunc: func(c context.Context, e event.DeleteEvent, q workqueue.RateLimitingInterface) {
-				for _, req := range r.requestsForNetworkSwitch(c, e.Object) {
-					q.Add(req)
-				}
+				r.enqueueRequests(c, q, r.requestsForNetworkSwitch(c, e.Object, nil))
 			},
 		}, builder.WithPredicates(networkSwitchPredicate)).
 		Complete(r)
@@ -143,8 +143,18 @@ func (r *DeviceProcessDeploymentReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
+	if hasUnsupportedSelector(&deployment.Spec.Selector) {
+		r.Recorder.Event(&deployment, corev1.EventTypeWarning, "UnsupportedSelector", "selector uses NotIn/DoesNotExist; reconcile skipped")
+		logger.Info("skipping reconcile due to unsupported selector operators", "selector", deployment.Spec.Selector)
+		return ctrl.Result{}, nil
+	}
+
 	devices, err := r.listNetworkSwitches(ctx, deployment.Namespace, selector)
 	if err != nil {
+		if errors.Is(err, errNetworkSwitchUnavailable) {
+			logger.Info("network switch kind unavailable; skipping reconcile", "namespace", deployment.Namespace)
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -293,7 +303,7 @@ func (r *DeviceProcessDeploymentReconciler) cleanupStale(ctx context.Context, de
 	return deleted, nil
 }
 
-func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context.Context, obj client.Object) []reconcile.Request {
+func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context.Context, obj client.Object, keys []string) []reconcile.Request {
 	switchObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return nil
@@ -304,11 +314,19 @@ func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context
 		return nil
 	}
 
+	keysToCheck := keys
+	if len(keysToCheck) == 0 {
+		keysToCheck = make([]string, 0, len(labelsMap))
+		for k := range labelsMap {
+			keysToCheck = append(keysToCheck, k)
+		}
+	}
+
 	labelSet := labels.Set(labelsMap)
 	seen := make(map[types.NamespacedName]struct{})
 	requests := make([]reconcile.Request, 0)
 
-	for key := range labelsMap {
+	for _, key := range keysToCheck {
 		var deployments apiv1alpha1.DeviceProcessDeploymentList
 		if err := r.List(ctx, &deployments,
 			client.InNamespace(switchObj.GetNamespace()),
@@ -339,6 +357,41 @@ func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context
 	return requests
 }
 
+func (r *DeviceProcessDeploymentReconciler) enqueueRequests(ctx context.Context, q workqueue.RateLimitingInterface, reqs []reconcile.Request) {
+	if len(reqs) == 0 {
+		return
+	}
+	seen := make(map[types.NamespacedName]struct{}, len(reqs))
+	for i := range reqs {
+		nn := reqs[i].NamespacedName
+		if _, ok := seen[nn]; ok {
+			continue
+		}
+		seen[nn] = struct{}{}
+		q.Add(reqs[i])
+	}
+}
+
+func changedLabelKeys(oldObj client.Object, newObj client.Object) []string {
+	if oldObj == nil || newObj == nil {
+		return nil
+	}
+	oldLabels := oldObj.GetLabels()
+	newLabels := newObj.GetLabels()
+	keys := sets.New[string]()
+	for k := range oldLabels {
+		if newLabels[k] != oldLabels[k] {
+			keys.Insert(k)
+		}
+	}
+	for k := range newLabels {
+		if oldLabels[k] != newLabels[k] {
+			keys.Insert(k)
+		}
+	}
+	return sets.List(keys)
+}
+
 func (r *DeviceProcessDeploymentReconciler) listNetworkSwitches(ctx context.Context, namespace string, selector labels.Selector) ([]unstructured.Unstructured, error) {
 	list := &unstructured.UnstructuredList{}
 	gvk := schema.GroupVersion{Group: "azure.com", Version: "v1alpha1"}.WithKind("NetworkSwitchList")
@@ -352,12 +405,25 @@ func (r *DeviceProcessDeploymentReconciler) listNetworkSwitches(ctx context.Cont
 	if err := r.List(ctx, list, opts...); err != nil {
 		if metameta.IsNoMatchError(err) {
 			log.FromContext(ctx).Info("device kind not installed; skipping reconciliation for this kind", "gvk", gvk.String())
-			return nil, nil
+			return nil, errNetworkSwitchUnavailable
 		}
 		return nil, err
 	}
 
 	return list.Items, nil
+}
+
+func hasUnsupportedSelector(sel *metav1.LabelSelector) bool {
+	if sel == nil {
+		return false
+	}
+	for _, expr := range sel.MatchExpressions {
+		switch expr.Operator {
+		case metav1.LabelSelectorOpNotIn, metav1.LabelSelectorOpDoesNotExist:
+			return true
+		}
+	}
+	return false
 }
 
 func buildDesiredDeviceProcess(ctx context.Context, deployment *apiv1alpha1.DeviceProcessDeployment, device *unstructured.Unstructured, name string) *apiv1alpha1.DeviceProcess {
