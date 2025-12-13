@@ -63,7 +63,9 @@ spec:
               deploying DeviceProcesses.
             properties:
               selector:
-                description: Selector identifies target devices.
+                description: |-
+                  Selector identifies target devices.
+                  NotIn/DoesNotExist selectors are not supported; use matchLabels or In/Exists.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -105,10 +107,11 @@ spec:
                       operator is "In", and the values array contains only "value". The requirements are ANDed.
                     type: object
                 type: object
+                x-kubernetes-map-type: atomic
                 x-kubernetes-validations:
                 - message: NotIn/DoesNotExist matchExpressions are not supported
-                  rule: "!has(self.matchExpressions) || self.matchExpressions.all(me, me.operator != 'NotIn' && me.operator != 'DoesNotExist')"
-                x-kubernetes-map-type: atomic
+                  rule: '!has(self.matchExpressions) || self.matchExpressions.all(me,
+                    me.operator != ''NotIn'' && me.operator != ''DoesNotExist'')'
               template:
                 description: Template describes the DeviceProcess to run on matched
                   devices.

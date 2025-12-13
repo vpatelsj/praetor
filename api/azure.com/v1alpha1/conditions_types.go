@@ -6,6 +6,8 @@ type ConditionType string
 const (
 	// Agent connection / readiness
 	ConditionAgentConnected ConditionType = "AgentConnected"
+	// Spec observation / drift tracking
+	ConditionSpecObserved ConditionType = "SpecObserved"
 	// Artifact lifecycle
 	ConditionArtifactDownloaded ConditionType = "ArtifactDownloaded"
 	// Process lifecycle

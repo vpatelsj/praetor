@@ -1,138 +1,287 @@
-Here’s a Copilot prompt for **Step 2 (Minimal Controller: Deployment ⇒ Processes)** that’s explicit about boundaries (SSA, no status writes, no rollout logic), and gives you a clean vertical slice starting with **NetworkSwitch** inventory only.
+Cool — HTTP + local Docker Compose agents is a great MVP. The clean pattern here is:
+
+* **Agent pulls desired state** from Device Gateway (poll or long-poll with ETag).
+* **Agent pushes observations/heartbeat** back to Device Gateway (POST).
+* **Only Device Gateway talks to Kubernetes** (read desired from cache, write `DeviceProcess.status`, emit Events).
+
+Below is a **full Step 3 prompt** rewritten for HTTP + Docker Compose agents.
 
 ---
 
-## Copilot Prompt — Step 2: Minimal Controller (Deployment ⇒ Processes, DaemonSet semantics)
+## Full Prompt — Step 3 (HTTP Gateway + Docker Compose Agents)
 
-Implement **Step 2** in this repo: a minimal Kubernetes controller that reconciles `DeviceProcessDeployment` into per-device `DeviceProcess` objects (DaemonSet semantics). This is the **controller only**. Do NOT implement rollout batching, health checks, artifact download, or agent execution. The controller must **never write `DeviceProcess.status`**.
+### Goal
 
-### Scope / Goals
+Implement an MVP **device agent** that runs as a local container (docker compose) and talks **only** to a **Device Gateway** over HTTP to:
 
-* Watch `DeviceProcessDeployment` resources.
-* List device inventory CRDs for **one device kind only to start**: `NetworkSwitch` (assume it exists in-cluster).
-* Match devices using `.spec.selector` (LabelSelector).
-* For each matched device, **create or patch** a `DeviceProcess` that represents the desired workload on that device.
-* Ensure garbage collection / cleanup when selector changes or deployment is deleted.
+* Identify itself as device **X**
+* Fetch desired `DeviceProcess` state for X
+* Report **AgentConnected**, **SpecObserved(hash)**, and periodic **heartbeat**
+* Never talk to Kubernetes directly
 
-### Assumptions (for now)
+The **Device Gateway** is responsible for:
 
-* `NetworkSwitch` CRD exists and is namespaced.
-* It has standard `metadata.labels`.
-* We can access it via a typed client or (if no Go types exist) via `unstructured.Unstructured` with GVK:
+* Fetching desired state from Kubernetes (via controller/informer cache or direct client)
+* Writing `DeviceProcess.status` updates to Kubernetes
+* Emitting Kubernetes Events
 
-  * Group: `azure.com`
-  * Version: `v1alpha1`
-  * Kind: `NetworkSwitch`
-  * Resource: `networkswitches` (if unsure, discover from RESTMapper dynamically)
-* The `DeviceProcessDeployment` is namespaced; create `DeviceProcess` objects in the **same namespace**.
+This step **does not** run systemd/initd/container workloads yet. Only “observe & report”.
 
 ---
 
-## Implementation Requirements
+## Non-Negotiables
 
-### 1) Controller wiring
+1. Agents do **not** use kubeconfig, service accounts, or Kubernetes APIs.
+2. Gateway is the **only writer** of `DeviceProcess.status` and Events.
+3. Gateway must **rate limit/coalesce** writes to apiserver (no “write on every heartbeat”).
+4. Everything is **idempotent**:
 
-* Add controller manager wiring under `controller/main.go` (or new files under `controller/`):
-
-  * register scheme for our CRDs
-  * set up controller-runtime manager
-  * register a reconciler for `DeviceProcessDeployment`
-
-### 2) Reconciler behavior (core)
-
-For each `DeviceProcessDeployment`:
-
-1. Convert `.spec.selector` into a label selector and **list matching NetworkSwitch objects** in the same namespace.
-2. For each matched NetworkSwitch named `<deviceName>`:
-
-   * Compute the `DeviceProcess` name:
-
-     * prefer stable: `<deploymentName>-<deviceName>`
-     * if that exceeds DNS1123 label limits, use `<deploymentName>-<hash(deviceName)>` (keep deterministic)
-   * Build desired `DeviceProcess` **spec** from deployment `.spec.template.spec` plus `deviceRef`:
-
-     * `spec.deviceRef.kind = "NetworkSwitch"`
-     * `spec.deviceRef.name = <deviceName>`
-   * Apply labels to DeviceProcess:
-
-     * `app: <deploymentName>`
-     * copy a **safe subset** of device labels (or all labels) — but ensure we don’t exceed label size limits; at minimum keep device labels that drive queries (e.g. `role`, `type`, `rack`)
-3. Ensure `ownerReferences` is set to the `DeviceProcessDeployment` so deletion GC works.
-4. **Delete stale DeviceProcess objects** that belong to this deployment but no longer match the selector:
-
-   * Identify owned DeviceProcesses via:
-
-     * label `app=<deploymentName>` AND ownerRef UID, OR
-     * label like `deviceprocessdeployment=<deploymentName>` (add this label)
-   * If a previously created DeviceProcess corresponds to a device no longer selected, delete it.
-
-### 3) Server-Side Apply (SSA) for spec ownership
-
-* Use **Server-Side Apply** when creating/updating `DeviceProcess.spec`, so the controller and agent can manage different fields without stomping:
-
-  * Use a consistent field manager name: `"deviceprocess-controller"`
-  * Use `ForceOwnership=false` by default (do NOT steal fields from agent)
-  * Only apply `metadata.labels`, `metadata.ownerReferences`, and `spec` (not status)
-* The reconciler should be idempotent: repeated reconciles produce no changes if nothing changed.
-
-### 4) Never write status
-
-* Do not set `.status` on `DeviceProcess`.
-* You MAY update `.status.observedGeneration` on the **DeviceProcessDeployment** later in Step 7; for Step 2, it’s OK to not update deployment status at all.
-
-### 5) Events + logging
-
-* Log key actions:
-
-  * how many devices matched
-  * created / updated / deleted counts
-* Emit Kubernetes events on the `DeviceProcessDeployment` for:
-
-  * “CreatedDeviceProcess”
-  * “DeletedDeviceProcess”
-    (Keep event spam bounded: only emit per reconcile summary or only on changes.)
-
-### 6) RBAC
-
-Add the kubebuilder RBAC markers (or explicit RBAC yaml) so the controller can:
-
-* get/list/watch DeviceProcessDeployments
-* create/patch/delete/get/list/watch DeviceProcesses
-* get/list/watch NetworkSwitch inventory objects
-* create events
-
-### 7) Tests (minimum viable)
-
-Add unit tests using envtest or fake client:
-
-* Reconcile creates N DeviceProcesses when N NetworkSwitch match selector.
-* Changing selector deletes stale DeviceProcesses.
-* Deleting deployment leads to GC via ownerRef (at least verify ownerRef is set correctly; optional: simulate deletion).
+   * repeated heartbeats don’t cause status churn
+   * repeated “observed spec hash” doesn’t re-write status
 
 ---
 
-## Deliverables / Definition of Done
+## HTTP API Contract (MVP)
 
-* `kubectl apply -f <deployment sample>` creates N `DeviceProcess` objects for matching NetworkSwitches.
-* `kubectl delete deviceprocessdeployment <name>` results in DeviceProcesses being garbage collected (ownerRef).
-* Changing selector changes created/deleted DeviceProcesses accordingly.
-* Controller uses SSA and never touches DeviceProcess status.
+### Authentication (MVP-simple)
+
+For docker compose MVP, use a shared key header:
+
+* Agent sends: `X-Device-Token: <token>`
+* Gateway maps token → deviceName OR validates token for provided `deviceName`
+
+(You can swap to mTLS later without changing endpoint shapes.)
+
+### 1) Fetch Desired State
+
+Agent polls for desired state with caching.
+
+**GET** `/v1/devices/{deviceName}/desired`
+
+Response `200`:
+
+```json
+{
+  "deviceName": "tor1-01",
+  "heartbeatIntervalSeconds": 15,
+  "items": [
+    {
+      "uid": "…optional…",
+      "namespace": "infra-system",
+      "name": "switch-agent-tor1-01",
+      "generation": 2,
+      "spec": { /* DeviceProcessSpec JSON (or normalized subset) */ },
+      "specHash": "sha256:abcd…"
+    }
+  ]
+}
+```
+
+Caching behavior:
+
+* Gateway sets `ETag: "<desiredStateHash>"`
+* Agent uses `If-None-Match: "<desiredStateHash>"`
+* If unchanged, gateway returns `304 Not Modified` with empty body.
+
+**MVP polling strategy**
+
+* Normal poll every `heartbeatIntervalSeconds` (or 10s)
+* If `304`, just sleep and retry
+* Optional: support long-poll with `?waitSeconds=30` (gateway blocks until change or timeout)
+
+### 2) Post Heartbeat + Observations
+
+Agent reports observations back to gateway.
+
+**POST** `/v1/devices/{deviceName}/report`
+
+Request body:
+
+```json
+{
+  "agentVersion": "0.1.0",
+  "timestamp": "2025-12-12T23:55:00Z",
+  "heartbeat": true,
+  "observations": [
+    {
+      "namespace": "infra-system",
+      "name": "switch-agent-tor1-01",
+      "observedSpecHash": "sha256:abcd…"
+    }
+  ]
+}
+```
+
+Response `200`:
+
+```json
+{
+  "ack": true
+}
+```
+
+### 3) Optional: First Connect Convenience
+
+You can skip this and just use `/report`, but if you like:
+
+**POST** `/v1/devices/{deviceName}/connect`
+
+```json
+{ "agentVersion": "0.1.0" }
+```
+
+Gateway emits a single Event `AgentConnected` and marks device as connected.
 
 ---
 
-## Output requested
+## Gateway Responsibilities (Step 3 Scope)
 
-After implementation, show:
+### A) Desired State Source
 
-* list of new/modified files
-* the reconciler code in full
-* any RBAC markers or YAML
-* how to run locally (make targets) and a quick manual demo command sequence
+Gateway must be able to answer: “what `DeviceProcess` objects are targeted to device X?”
 
-Constraints:
+Implement either:
 
-* No rollout batching or update strategy logic yet.
-* No querying multiple device kinds yet (NetworkSwitch only).
-* Keep naming deterministic, safe (DNS1123), and stable.
+* **Simple MVP**: list/watch `DeviceProcess` and filter `spec.deviceRef.name == deviceName` (in-memory informer cache)
+* **Better**: require controller to label processes with `apollo.azure.com/deviceName=<deviceName>` and gateway queries cache by label index
+
+### B) Status Updates (Kubernetes write path)
+
+When gateway receives `/report`:
+
+* For each observed DP:
+
+  * Patch `status.phase = "Pending"` (MVP)
+  * Upsert condition `AgentConnected=True`
+  * Upsert condition `SpecObserved=True` with message including observed hash
+  * Set `status.observedSpecHash = <hash>` (or observedGeneration if you choose that model)
+
+**Coalescing requirement**
+
+* Do NOT write status on every heartbeat.
+* Maintain `lastSeen[deviceName]` in memory updated on every report.
+* Only write to Kubernetes when:
+
+  * AgentConnected changes (False→True or True→False)
+  * observedSpecHash changes
+  * (optional) once every N minutes as a “sync” write
+
+### C) Disconnect / Staleness Detection
+
+If `now - lastSeen[deviceName] > 3 * heartbeatIntervalSeconds`:
+
+* Patch all DeviceProcesses for device X with `AgentConnected=False`
+* Emit a Warning Event (rate limited), e.g. `AgentDisconnected`
+
+### D) Events
+
+Gateway should emit:
+
+* `Normal AgentConnected` once per connection (or first report)
+* `Normal SpecObserved` when observedSpecHash changes
+* `Warning AgentDisconnected` on staleness
 
 ---
+
+## Agent Responsibilities (Step 3 Scope)
+
+### A) Identity
+
+Agent container requires:
+
+* `APOLLO_DEVICE_NAME=tor1-01`
+* `APOLLO_GATEWAY_URL=http://device-gateway:8080`
+* `APOLLO_DEVICE_TOKEN=…`
+
+If device name missing → exit with clear error.
+
+### B) Main Loop
+
+Per device:
+
+1. `GET /desired` with `If-None-Match` support
+2. For each desired item:
+
+   * If `specHash` differs from local `lastObservedSpecHash[name]`:
+
+     * send observation `{ name, namespace, observedSpecHash }`
+     * store the hash locally (in memory is fine for MVP)
+3. Every interval:
+
+   * `POST /report` with `heartbeat=true` (include observations if any)
+4. Reconnect/backoff:
+
+   * exponential backoff + jitter on errors
+   * do not hot-loop
+
+### C) No Kubernetes, no workload execution
+
+Step 3 is purely “observe desired, report status”.
+
+---
+
+## Definition of Done (DoD)
+
+1. Apply a `DeviceProcess` in the cluster with `spec.deviceRef.name=tor1-01`
+2. Start gateway (pointing to the cluster)
+3. Start agent in docker compose with `APOLLO_DEVICE_NAME=tor1-01`
+4. Within **≤ 5 seconds**:
+
+   * `kubectl describe deviceprocess …` shows:
+
+     * `phase: Pending`
+     * `AgentConnected=True`
+     * `SpecObserved=True`
+     * `observedSpecHash` populated
+   * Events appear from gateway
+5. Edit `DeviceProcess.spec` (change args/env):
+
+   * desired ETag changes
+   * agent reports new observed hash
+   * gateway updates status + emits `SpecObserved`
+6. Stop the agent:
+
+   * after staleness window, gateway sets `AgentConnected=False` + emits Warning event
+
+---
+
+## Docker Compose (example)
+
+Provide a minimal compose file that runs N agents:
+
+```yaml
+services:
+  agent-tor1-01:
+    image: apollo/device-agent:dev
+    environment:
+      - APOLLO_DEVICE_NAME=tor1-01
+      - APOLLO_GATEWAY_URL=http://host.docker.internal:8080
+      - APOLLO_DEVICE_TOKEN=devtoken-tor1-01
+  agent-tor1-02:
+    image: apollo/device-agent:dev
+    environment:
+      - APOLLO_DEVICE_NAME=tor1-02
+      - APOLLO_GATEWAY_URL=http://host.docker.internal:8080
+      - APOLLO_DEVICE_TOKEN=devtoken-tor1-02
+```
+
+(If gateway is also in compose, use `http://device-gateway:8080` instead.)
+
+---
+
+## Output Required
+
+1. Gateway HTTP server (Go preferred) implementing:
+
+   * `GET /v1/devices/{device}/desired` with ETag/304
+   * `POST /v1/devices/{device}/report`
+   * in-memory `lastSeen` + staleness timer
+   * Kubernetes status patch + event emission helpers
+   * write coalescing / rate limiting
+2. Agent implementation (Go preferred) implementing polling + report loop
+3. Minimal RBAC for gateway (not for agent)
+4. Test instructions with exact kubectl commands + curl examples
+
+---
+
+If you tell me where you want the gateway to run **right now** (a pod in cluster vs. local process using kubeconfig), I’ll tailor the “How to run” section and the compose networking (`host.docker.internal` vs. port-forward vs. NodePort) so it’s painless.

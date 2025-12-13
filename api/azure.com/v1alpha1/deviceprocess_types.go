@@ -159,6 +159,8 @@ type DeviceProcessStatus struct {
 	Phase DeviceProcessPhase `json:"phase,omitempty"`
 	// Conditions capture granular state transitions.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// ObservedSpecHash tracks the last spec hash reported by the device agent.
+	ObservedSpecHash string `json:"observedSpecHash,omitempty"`
 	// ArtifactVersion is the resolved artifact version (tag or digest).
 	ArtifactVersion string `json:"artifactVersion,omitempty"`
 	// PID is the process identifier on the target device.

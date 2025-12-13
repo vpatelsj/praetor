@@ -298,6 +298,10 @@ spec:
                 description: LastTransitionTime is when the phase last changed.
                 format: date-time
                 type: string
+              observedSpecHash:
+                description: ObservedSpecHash tracks the last spec hash reported by
+                  the device agent.
+                type: string
               phase:
                 description: Phase is a high-level summary of process state.
                 enum:

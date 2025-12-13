@@ -1,0 +1,520 @@
+package gateway
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
+	"github.com/apollo/praetor/pkg/conditions"
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+)
+
+const (
+	defaultHeartbeatSeconds = 15
+	desiredETagHeader       = "ETag"
+	deviceTokenHeader       = "X-Device-Token"
+)
+
+// DesiredItem describes a desired DeviceProcess instance for a device.
+type DesiredItem struct {
+	UID        string                        `json:"uid,omitempty"`
+	Namespace  string                        `json:"namespace"`
+	Name       string                        `json:"name"`
+	Generation int64                         `json:"generation"`
+	Spec       apiv1alpha1.DeviceProcessSpec `json:"spec"`
+	SpecHash   string                        `json:"specHash"`
+}
+
+// DesiredResponse is returned to an agent polling for desired state.
+type DesiredResponse struct {
+	DeviceName               string        `json:"deviceName"`
+	HeartbeatIntervalSeconds int           `json:"heartbeatIntervalSeconds"`
+	Items                    []DesiredItem `json:"items"`
+}
+
+// ReportRequest is sent by the agent with heartbeat and observations.
+type ReportRequest struct {
+	AgentVersion string        `json:"agentVersion"`
+	Timestamp    string        `json:"timestamp"`
+	Heartbeat    bool          `json:"heartbeat"`
+	Observations []Observation `json:"observations"`
+}
+
+// Observation reports the agent's view of a single DeviceProcess.
+type Observation struct {
+	Namespace        string `json:"namespace"`
+	Name             string `json:"name"`
+	ObservedSpecHash string `json:"observedSpecHash"`
+}
+
+// ReportResponse acknowledges a report.
+type ReportResponse struct {
+	Ack bool `json:"ack"`
+}
+
+// Gateway serves HTTP endpoints for devices and updates Kubernetes status.
+// It implements manager.Runnable so it can be added to a controller-runtime Manager.
+type Gateway struct {
+	client   client.Client
+	recorder recordEmitter
+	log      logr.Logger
+
+	addr            string
+	authToken       string
+	defaultInterval time.Duration
+	staleMultiplier int
+
+	mu             sync.RWMutex
+	lastSeen       map[string]time.Time
+	heartbeatHints map[string]int
+
+	server *http.Server
+}
+
+// recordEmitter captures the EventRecorder interface we need.
+type recordEmitter interface {
+	Event(object runtime.Object, eventtype, reason, message string)
+	Eventf(object runtime.Object, eventtype, reason, messageFmt string, args ...any)
+}
+
+// New constructs a Gateway server instance.
+func New(c client.Client, recorder recordEmitter, addr, token string, defaultInterval time.Duration, staleMultiplier int) *Gateway {
+	return &Gateway{
+		client:          c,
+		recorder:        recorder,
+		log:             ctrl.Log.WithName("gateway"),
+		addr:            addr,
+		authToken:       strings.TrimSpace(token),
+		defaultInterval: defaultInterval,
+		staleMultiplier: staleMultiplier,
+		lastSeen:        make(map[string]time.Time),
+		heartbeatHints:  make(map[string]int),
+	}
+}
+
+// Start runs the HTTP server and staleness loop until the context is cancelled.
+func (g *Gateway) Start(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
+	mux.HandleFunc("/v1/devices/", g.handleDevice)
+
+	g.server = &http.Server{Addr: g.addr, Handler: mux}
+
+	go g.stalenessLoop(ctx)
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := g.server.ListenAndServe()
+		if !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = g.server.Shutdown(shutdownCtx)
+
+	if err := <-errCh; err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *Gateway) handleDevice(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 4 {
+		http.NotFound(w, r)
+		return
+	}
+
+	deviceName := parts[2]
+	action := parts[3]
+
+	if !g.authorize(r, deviceName) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	switch action {
+	case "desired":
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		g.handleDesired(ctx, w, r, deviceName)
+	case "report":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		g.handleReport(ctx, w, r, deviceName)
+	case "connect":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		g.handleConnect(ctx, w, r, deviceName)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (g *Gateway) authorize(r *http.Request, _ string) bool {
+	if g.authToken == "" {
+		return true
+	}
+	return strings.TrimSpace(r.Header.Get(deviceTokenHeader)) == g.authToken
+}
+
+func (g *Gateway) handleDesired(ctx context.Context, w http.ResponseWriter, r *http.Request, deviceName string) {
+	desired, etag, err := g.computeDesired(ctx, deviceName)
+	if err != nil {
+		g.respondErr(ctx, w, http.StatusInternalServerError, "failed to compute desired state")
+		g.log.Error(err, "compute desired", "device", deviceName)
+		return
+	}
+
+	g.recordHeartbeat(deviceName, desired.HeartbeatIntervalSeconds)
+
+	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(desiredETagHeader, etag)
+	if err := json.NewEncoder(w).Encode(desired); err != nil {
+		g.log.Error(err, "encode desired response", "device", deviceName)
+	}
+}
+
+func (g *Gateway) handleReport(ctx context.Context, w http.ResponseWriter, r *http.Request, deviceName string) {
+	defer r.Body.Close()
+	var req ReportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		g.respondErr(ctx, w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	g.recordHeartbeat(deviceName, 0)
+
+	for i := range req.Observations {
+		obs := req.Observations[i]
+		if err := g.updateStatusForObservation(ctx, deviceName, obs); err != nil {
+			if apierrors.IsNotFound(err) {
+				g.log.V(1).Info("deviceprocess not found for observation", "device", deviceName, "name", obs.Name, "namespace", obs.Namespace)
+				continue
+			}
+			g.log.Error(err, "update status from observation", "device", deviceName, "name", obs.Name, "namespace", obs.Namespace)
+			g.respondErr(ctx, w, http.StatusInternalServerError, "failed to apply observation")
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ReportResponse{Ack: true})
+}
+
+func (g *Gateway) handleConnect(ctx context.Context, w http.ResponseWriter, r *http.Request, deviceName string) {
+	g.recordHeartbeat(deviceName, 0)
+	if err := g.markDeviceConnected(ctx, deviceName); err != nil {
+		g.log.Error(err, "mark device connected", "device", deviceName)
+		g.respondErr(ctx, w, http.StatusInternalServerError, "failed to mark device connected")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ReportResponse{Ack: true})
+}
+
+func (g *Gateway) respondErr(ctx context.Context, w http.ResponseWriter, status int, msg string) {
+	log.FromContext(ctx).V(1).Info("http error", "status", status, "message", msg)
+	http.Error(w, msg, status)
+}
+
+func (g *Gateway) computeDesired(ctx context.Context, deviceName string) (*DesiredResponse, string, error) {
+	processes, err := g.listDeviceProcesses(ctx, deviceName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	items := make([]DesiredItem, 0, len(processes))
+	for i := range processes {
+		proc := processes[i]
+		specHash := hashSpec(&proc.Spec)
+		items = append(items, DesiredItem{
+			UID:        string(proc.UID),
+			Namespace:  proc.Namespace,
+			Name:       proc.Name,
+			Generation: proc.Generation,
+			Spec:       proc.Spec,
+			SpecHash:   specHash,
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Namespace == items[j].Namespace {
+			return items[i].Name < items[j].Name
+		}
+		return items[i].Namespace < items[j].Namespace
+	})
+
+	heartbeat := defaultHeartbeatSeconds
+	g.mu.Lock()
+	if hint, ok := g.heartbeatHints[deviceName]; ok && hint > 0 {
+		heartbeat = hint
+	}
+	g.heartbeatHints[deviceName] = heartbeat
+	g.mu.Unlock()
+
+	desired := &DesiredResponse{
+		DeviceName:               deviceName,
+		HeartbeatIntervalSeconds: heartbeat,
+		Items:                    items,
+	}
+
+	etag := hashDesired(items)
+	return desired, etag, nil
+}
+
+func (g *Gateway) listDeviceProcesses(ctx context.Context, deviceName string) ([]apiv1alpha1.DeviceProcess, error) {
+	var list apiv1alpha1.DeviceProcessList
+	if err := g.client.List(ctx, &list); err != nil {
+		return nil, err
+	}
+
+	processes := make([]apiv1alpha1.DeviceProcess, 0)
+	for i := range list.Items {
+		proc := list.Items[i]
+		if proc.Spec.DeviceRef.Name == deviceName {
+			processes = append(processes, proc)
+		}
+	}
+	return processes, nil
+}
+
+func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName string, obs Observation) error {
+	var proc apiv1alpha1.DeviceProcess
+	key := types.NamespacedName{Name: obs.Name, Namespace: obs.Namespace}
+	if err := g.client.Get(ctx, key, &proc); err != nil {
+		return err
+	}
+
+	before := proc.DeepCopy()
+
+	if proc.Status.Phase == "" {
+		proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
+	}
+
+	connectedChanged := setAgentConnected(&proc.Status, true, "Heartbeat", fmt.Sprintf("device %s reported", deviceName))
+	specObservedChanged := false
+	if obs.ObservedSpecHash != "" && proc.Status.ObservedSpecHash != obs.ObservedSpecHash {
+		proc.Status.ObservedSpecHash = obs.ObservedSpecHash
+		conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecObserved, "SpecObserved", fmt.Sprintf("hash=%s", obs.ObservedSpecHash))
+		specObservedChanged = true
+	}
+
+	if reflectDeepEqualStatus(before.Status, proc.Status) {
+		return nil
+	}
+
+	if err := g.client.Status().Patch(ctx, &proc, client.MergeFrom(before)); err != nil {
+		return err
+	}
+
+	if connectedChanged {
+		g.recorder.Event(&proc, corev1.EventTypeNormal, "AgentConnected", fmt.Sprintf("device %s connected", deviceName))
+	}
+	if specObservedChanged {
+		g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", fmt.Sprintf("hash %s", obs.ObservedSpecHash))
+	}
+
+	return nil
+}
+
+func (g *Gateway) markDeviceConnected(ctx context.Context, deviceName string) error {
+	procs, err := g.listDeviceProcesses(ctx, deviceName)
+	if err != nil {
+		return err
+	}
+	for i := range procs {
+		proc := procs[i]
+		before := proc.DeepCopy()
+		changed := setAgentConnected(&proc.Status, true, "AgentConnected", "agent reported connected")
+		if !changed {
+			continue
+		}
+		if err := g.client.Status().Patch(ctx, &proc, client.MergeFrom(before)); err != nil {
+			return err
+		}
+		g.recorder.Event(&proc, corev1.EventTypeNormal, "AgentConnected", "device connected")
+	}
+	return nil
+}
+
+func (g *Gateway) stalenessLoop(ctx context.Context) {
+	interval := g.defaultInterval
+	if interval <= 0 {
+		interval = time.Duration(defaultHeartbeatSeconds) * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			g.markStaleDevices(ctx)
+		}
+	}
+}
+
+func (g *Gateway) markStaleDevices(ctx context.Context) {
+	now := time.Now()
+	g.mu.RLock()
+	last := make(map[string]time.Time, len(g.lastSeen))
+	interval := make(map[string]int, len(g.heartbeatHints))
+	for k, v := range g.lastSeen {
+		last[k] = v
+	}
+	for k, v := range g.heartbeatHints {
+		interval[k] = v
+	}
+	g.mu.RUnlock()
+
+	for device, seen := range last {
+		hb := interval[device]
+		if hb <= 0 {
+			hb = int(g.defaultInterval.Seconds())
+			if hb <= 0 {
+				hb = defaultHeartbeatSeconds
+			}
+		}
+		staleAfter := time.Duration(hb*g.staleMultiplier) * time.Second
+		if now.Sub(seen) <= staleAfter {
+			continue
+		}
+		if err := g.markDeviceDisconnected(ctx, device, now.Sub(seen)); err != nil {
+			g.log.Error(err, "mark device disconnected", "device", device)
+		}
+	}
+}
+
+func (g *Gateway) markDeviceDisconnected(ctx context.Context, deviceName string, age time.Duration) error {
+	procs, err := g.listDeviceProcesses(ctx, deviceName)
+	if err != nil {
+		return err
+	}
+
+	for i := range procs {
+		proc := procs[i]
+		before := proc.DeepCopy()
+		changed := setAgentConnected(&proc.Status, false, "AgentDisconnected", fmt.Sprintf("last seen %s ago", age.Round(time.Second)))
+		if !changed {
+			continue
+		}
+		if proc.Status.Phase == "" {
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
+		}
+		if err := g.client.Status().Patch(ctx, &proc, client.MergeFrom(before)); err != nil {
+			return err
+		}
+		g.recorder.Event(&proc, corev1.EventTypeWarning, "AgentDisconnected", fmt.Sprintf("device %s stale", deviceName))
+	}
+	return nil
+}
+
+func (g *Gateway) recordHeartbeat(deviceName string, heartbeatHint int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.lastSeen[deviceName] = time.Now()
+	if heartbeatHint > 0 {
+		g.heartbeatHints[deviceName] = heartbeatHint
+	}
+}
+
+func setAgentConnected(status *apiv1alpha1.DeviceProcessStatus, connected bool, reason, message string) bool {
+	desiredStatus := metav1.ConditionFalse
+	if connected {
+		desiredStatus = metav1.ConditionTrue
+	}
+
+	before := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected)
+	conditions.SetCondition(&status.Conditions, metav1.Condition{Type: string(apiv1alpha1.ConditionAgentConnected), Status: desiredStatus, Reason: reason, Message: message})
+	after := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected)
+
+	return before == nil || after == nil || before.Status != after.Status || before.Message != after.Message
+}
+
+func hashSpec(spec *apiv1alpha1.DeviceProcessSpec) string {
+	data, _ := json.Marshal(spec)
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func hashDesired(items []DesiredItem) string {
+	data, _ := json.Marshal(items)
+	sum := sha256.Sum256(data)
+	return "\"" + hex.EncodeToString(sum[:]) + "\""
+}
+
+func reflectDeepEqualStatus(a, b apiv1alpha1.DeviceProcessStatus) bool {
+	return a.Phase == b.Phase &&
+		a.ObservedSpecHash == b.ObservedSpecHash &&
+		conditionsEqual(a.Conditions, b.Conditions) &&
+		a.ArtifactVersion == b.ArtifactVersion &&
+		a.PID == b.PID &&
+		equalTimePtr(a.StartTime, b.StartTime) &&
+		equalTimePtr(a.LastTransitionTime, b.LastTransitionTime) &&
+		a.RestartCount == b.RestartCount &&
+		a.LastTerminationReason == b.LastTerminationReason
+}
+
+func conditionsEqual(a, b []metav1.Condition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Type != b[i].Type || a[i].Status != b[i].Status || a[i].Reason != b[i].Reason || a[i].Message != b[i].Message {
+			return false
+		}
+	}
+	return true
+}
+
+func equalTimePtr(a, b *metav1.Time) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Equal(b)
+	}
+}

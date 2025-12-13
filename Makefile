@@ -40,6 +40,7 @@ manifests: tools
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-controller ./controller
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-agent ./agent
+	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-gateway ./cmd/gateway
 
 # Build controller container image (local)
 kind-image:
