@@ -1,7 +1,7 @@
 apiVersion: azure.com/v1alpha1
 kind: DeviceProcessDeployment
 metadata:
-  name: demo-logger
+  name: firmware-upgrade
 spec:
   selector:
     matchLabels:

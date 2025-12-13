@@ -67,6 +67,8 @@ type Observation struct {
 	Namespace        string `json:"namespace"`
 	Name             string `json:"name"`
 	ObservedSpecHash string `json:"observedSpecHash"`
+	ProcessStarted   *bool  `json:"processStarted,omitempty"`
+	Healthy          *bool  `json:"healthy,omitempty"`
 }
 
 // ReportResponse acknowledges a report.
@@ -424,6 +426,32 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			specObservedChanged = true
 		}
 
+		processStartedChanged := false
+		if obs.ProcessStarted != nil {
+			if *obs.ProcessStarted {
+				conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessStarted", "process started")
+				if proc.Status.Phase == apiv1alpha1.DeviceProcessPhasePending || proc.Status.Phase == "" {
+					proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
+				}
+			} else {
+				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessNotStarted", "process not started")
+			}
+			processStartedChanged = true
+		}
+
+		healthChanged := false
+		if obs.Healthy != nil {
+			if *obs.Healthy {
+				conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionHealthy, "Healthy", "process healthy")
+				if proc.Status.Phase == apiv1alpha1.DeviceProcessPhasePending || proc.Status.Phase == "" {
+					proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
+				}
+			} else {
+				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionHealthy, "Unhealthy", "process reported unhealthy")
+			}
+			healthChanged = true
+		}
+
 		if reflectDeepEqualStatus(before.Status, proc.Status) {
 			return nil
 		}
@@ -444,6 +472,16 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 				msg = fmt.Sprintf("%s at %s", msg, reportedAt.UTC().Format(time.RFC3339))
 			}
 			g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", msg)
+		}
+		if processStartedChanged && obs.ProcessStarted != nil && *obs.ProcessStarted {
+			g.recorder.Event(&proc, corev1.EventTypeNormal, "ProcessStarted", "process started")
+		}
+		if healthChanged && obs.Healthy != nil {
+			eventType := corev1.EventTypeNormal
+			if !*obs.Healthy {
+				eventType = corev1.EventTypeWarning
+			}
+			g.recorder.Event(&proc, eventType, "Healthy", "process health reported")
 		}
 
 		return nil

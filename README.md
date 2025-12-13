@@ -168,7 +168,7 @@ cat > /tmp/dpd.yaml <<'EOF'
 apiVersion: azure.com/v1alpha1
 kind: DeviceProcessDeployment
 metadata:
-	name: demo-logger
+	name: firmware-upgrade
 spec:
 	selector:
 		matchLabels:
@@ -226,20 +226,20 @@ docker compose up
 
 ```bash
 kubectl get deviceprocess
-kubectl describe deviceprocess demo-logger-tor1-01 | sed -n '/Events/,$p'
+kubectl describe deviceprocess firmware-upgrade-tor1-01 | sed -n '/Events/,$p'
 
 # Stop one agent to see stale flip and single warning event
 docker compose stop agent-tor1-02
 sleep 45
-kubectl get deviceprocess demo-logger-tor1-02 -o jsonpath='{.status.conditions}'
+kubectl get deviceprocess firmware-upgrade-tor1-02 -o jsonpath='{.status.conditions}'
 ```
 
 9) Optional: template change → new observed hash
 
 ```bash
-kubectl patch deviceprocessdeployment demo-logger --type merge -p '{"spec":{"template":{"spec":{"execution":{"args":["echo","updated"]}}}}}'
+kubectl patch deviceprocessdeployment firmware-upgrade --type merge -p '{"spec":{"template":{"spec":{"execution":{"args":["echo","updated"]}}}}}'
 sleep 10
-kubectl get deviceprocess demo-logger-tor1-01 -o jsonpath='{.status.observedSpecHash}'
+kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.observedSpecHash}'
 ```
 
 10) Cleanup

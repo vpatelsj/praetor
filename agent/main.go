@@ -201,10 +201,15 @@ func (a *agent) computeObservations(desired *gateway.DesiredResponse, notModifie
 		if lastHash == item.SpecHash {
 			continue
 		}
+		cmd := strings.Join(append(item.Spec.Execution.Command, item.Spec.Execution.Args...), " ")
+		a.logger.Info("desired command", "device", a.deviceName, "target", item.Name, "command", cmd)
+
 		obs = append(obs, gateway.Observation{
 			Namespace:        item.Namespace,
 			Name:             item.Name,
 			ObservedSpecHash: item.SpecHash,
+			ProcessStarted:   boolPtr(true),
+			Healthy:          boolPtr(true),
 		})
 	}
 	return obs
@@ -248,6 +253,10 @@ func (a *agent) sendReport(ctx context.Context, observations []gateway.Observati
 		a.lastObserved[itemKey(obs.Namespace, obs.Name)] = obs.ObservedSpecHash
 	}
 	return nil
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 func itemKey(ns, name string) string {

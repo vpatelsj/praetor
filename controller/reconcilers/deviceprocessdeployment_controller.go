@@ -3,7 +3,9 @@ package reconcilers
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
+	cond "github.com/apollo/praetor/pkg/conditions"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metameta "k8s.io/apimachinery/pkg/api/meta"
@@ -106,6 +109,7 @@ func (r *DeviceProcessDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) e
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&apiv1alpha1.DeviceProcessDeployment{}).
+		Owns(&apiv1alpha1.DeviceProcess{}).
 		Watches(networkSwitch, handler.Funcs{
 			CreateFunc: func(c context.Context, e event.CreateEvent, q workqueue.RateLimitingInterface) {
 				r.enqueueRequests(c, q, r.requestsForNetworkSwitch(c, e.Object, nil))
@@ -193,6 +197,10 @@ func (r *DeviceProcessDeploymentReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	logger.Info("reconcile complete", "ensured", ensuredCount, "created", createdCount, "deleted", deletedCount)
+
+	if err := r.updateStatus(ctx, &deployment, devices); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -302,6 +310,98 @@ func (r *DeviceProcessDeploymentReconciler) cleanupStale(ctx context.Context, de
 	}
 
 	return deleted, nil
+}
+
+func (r *DeviceProcessDeploymentReconciler) updateStatus(ctx context.Context, deployment *apiv1alpha1.DeviceProcessDeployment, devices []unstructured.Unstructured) error {
+	// Build quick lookup for desired spec hash per device to calculate "updated" counts.
+	desiredHashes := make(map[string]string, len(devices))
+	for i := range devices {
+		device := devices[i]
+		name := deviceProcessName(deployment.Name, device.GetName())
+		dp := buildDesiredDeviceProcess(ctx, deployment, &device, name)
+		desiredHashes[name] = hashDeviceProcessSpec(&dp.Spec)
+	}
+
+	var processList apiv1alpha1.DeviceProcessList
+	if err := r.List(ctx, &processList, client.InNamespace(deployment.Namespace), client.MatchingLabels{deviceProcessDeploymentKey: deployment.Name}); err != nil {
+		return err
+	}
+
+	current := int32(len(processList.Items))
+	updated := int32(0)
+	ready := int32(0)
+	available := int32(0)
+
+	for i := range processList.Items {
+		proc := processList.Items[i]
+		desiredHash := desiredHashes[proc.Name]
+		if desiredHash != "" && proc.Status.ObservedSpecHash == desiredHash {
+			updated++
+		}
+
+		if isProcessReady(&proc) {
+			ready++
+			available++
+		}
+	}
+
+	desired := int32(len(devices))
+	unavailable := desired - available
+	if unavailable < 0 {
+		unavailable = 0
+	}
+
+	status := deployment.Status
+	status.ObservedGeneration = deployment.Generation
+	status.DesiredNumberScheduled = desired
+	status.CurrentNumberScheduled = current
+	status.UpdatedNumberScheduled = updated
+	status.NumberReady = ready
+	status.NumberAvailable = available
+	status.NumberUnavailable = unavailable
+
+	// Conditions: Progressing and Available
+	if desired == 0 {
+		cond.MarkFalse(&status.Conditions, apiv1alpha1.ConditionAvailable, "NoTargets", "no devices matched selector")
+		cond.MarkFalse(&status.Conditions, apiv1alpha1.ConditionProgressing, "NoTargets", "no devices matched selector")
+	} else {
+		if available == desired {
+			cond.MarkTrue(&status.Conditions, apiv1alpha1.ConditionAvailable, "AllAvailable", "all device processes are available")
+		} else {
+			cond.MarkFalse(&status.Conditions, apiv1alpha1.ConditionAvailable, "NotEnoughAvailable", fmt.Sprintf("%d/%d available", available, desired))
+		}
+
+		if updated < desired || available < desired {
+			cond.MarkTrue(&status.Conditions, apiv1alpha1.ConditionProgressing, "Updating", fmt.Sprintf("updated=%d available=%d desired=%d", updated, available, desired))
+		} else {
+			cond.MarkFalse(&status.Conditions, apiv1alpha1.ConditionProgressing, "Updated", "all device processes updated")
+		}
+	}
+
+	if reflect.DeepEqual(deployment.Status, status) {
+		return nil
+	}
+
+	patch := client.MergeFrom(deployment.DeepCopy())
+	deployment.Status = status
+	return r.Status().Patch(ctx, deployment, patch)
+}
+
+func isProcessReady(proc *apiv1alpha1.DeviceProcess) bool {
+	if proc.Status.Phase != apiv1alpha1.DeviceProcessPhaseRunning {
+		return false
+	}
+
+	connected := cond.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionAgentConnected)
+	healthy := cond.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionHealthy)
+
+	return connected != nil && connected.Status == metav1.ConditionTrue && healthy != nil && healthy.Status == metav1.ConditionTrue
+}
+
+func hashDeviceProcessSpec(spec *apiv1alpha1.DeviceProcessSpec) string {
+	data, _ := json.Marshal(spec)
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context.Context, obj client.Object, keys []string) []reconcile.Request {

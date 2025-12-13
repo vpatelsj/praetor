@@ -20,6 +20,7 @@ export KIND_CLUSTER=apollo-dev
 kind delete cluster --name $KIND_CLUSTER || true
 kind create cluster --name $KIND_CLUSTER --image kindest/node:v1.29.4
 kubectl cluster-info --context kind-$KIND_CLUSTER
+make demo-build && make crd-install && make controller-deploy && make gateway-deploy
 ```
 
 ### 2) Generate, build images, and load into kind (one command)
@@ -130,12 +131,21 @@ docker compose up         # uses ./docker-compose.yaml with agent-tor1-01 and ag
 - **What:** check that DeviceProcess objects reflect agent connection and observed spec.
 - **Expectation:** conditions show AgentConnected=True, SpecObserved=True, observedSpecHash set; events exist.
 - **Why:** proves the gateway writes status/events back based on agent reports.
+
+we installed two networkswitches (tor1-01, tor1-02)  
+We installed a deviceprocessdeployment firmware-upgrade that targets those switches, so the controller should have created two deviceprocesses (firmware-upgrade-tor1-01, firmware-upgrade-tor1-02).
+
+We then started two agents via docker compose, one for each device.
+
+These agents talk to the gateway we port-forwarded in step 8. They poll the gateway, get their desired state, and report status back.
+
+The deviceprocess objects should now show that the agents are connected and have observed the spec. they should also have events logged.
+
 ```
-kubectl get deviceprocess
-kubectl describe deviceprocess demo-logger-tor1-01 | sed -n '/Events/,$p'
 ```
 
 # Conclusion
+
 
 
 
@@ -163,8 +173,8 @@ In another terminal:
 ```
 docker compose stop agent-tor1-02
 sleep 45   # wait past stale timeout (default ~30s) so AgentConnected flips False
-kubectl get deviceprocess demo-logger-tor1-02 -o jsonpath='{.status.conditions}'
-# (optional) kubectl describe deviceprocess demo-logger-tor1-02 | sed -n '/Events/,$p'
+kubectl get deviceprocess firmware-upgrade-tor1-02 -o jsonpath='{.status.conditions}'
+# (optional) kubectl describe deviceprocess firmware-upgrade-tor1-02 | sed -n '/Events/,$p'
 ```
 
 ### 12) Template change and observed hash
@@ -172,12 +182,12 @@ kubectl get deviceprocess demo-logger-tor1-02 -o jsonpath='{.status.conditions}'
 - **Expectation:** observedSpecHash on DeviceProcess changes after the agent polls the new spec.
 - **Why:** demonstrates config rollout signaling from control plane to devices.
 ```
-kubectl patch deviceprocessdeployment demo-logger --type merge \
+kubectl patch deviceprocessdeployment firmware-upgrade --type merge \
   -p '{"spec":{"template":{"spec":{"execution":{"args":["echo updated; sleep 3600"]}}}}}'
 # give the agent a few seconds to poll/apply, then check the observed hash
-kubectl get deviceprocess demo-logger-tor1-01 -o jsonpath='{.status.observedSpecHash}'
+kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.observedSpecHash}'
 sleep 10
-kubectl get deviceprocess demo-logger-tor1-01 -o jsonpath='{.status.observedSpecHash}'
+kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.observedSpecHash}'
 ```
 
 ### 13) Cleanup
@@ -185,6 +195,7 @@ kubectl get deviceprocess demo-logger-tor1-01 -o jsonpath='{.status.observedSpec
 - **Expectation:** docker compose exits and the kind cluster is removed.
 - **Why:** avoids leftover resources and frees ports/VM resources for the next run.
 ```
+export KIND_CLUSTER=apollo-dev
 docker compose down || true
 kind delete cluster --name $KIND_CLUSTER
 ```

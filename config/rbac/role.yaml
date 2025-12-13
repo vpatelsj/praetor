@@ -22,6 +22,8 @@ rules:
   - deviceprocessdeployments/status
   verbs:
   - get
+  - patch
+  - update
 - apiGroups:
   - azure.com
   resources:
