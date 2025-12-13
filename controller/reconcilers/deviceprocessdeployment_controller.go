@@ -40,6 +40,7 @@ const (
 	deviceProcessDeploymentKey    = "deviceprocessdeployment"
 	deviceProcessDeploymentUIDKey = "deviceprocessdeployment-uid"
 	selectorKeysIndex             = "selectorKeys"
+	allSelectorIndexKey           = "__all__"
 )
 
 var errNetworkSwitchUnavailable = errors.New("networkswitch kind unavailable")
@@ -310,17 +311,19 @@ func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context
 	}
 
 	labelsMap := switchObj.GetLabels()
-	if len(labelsMap) == 0 {
-		return nil
-	}
 
-	keysToCheck := keys
-	if len(keysToCheck) == 0 {
-		keysToCheck = make([]string, 0, len(labelsMap))
+	keySet := sets.New[string](allSelectorIndexKey)
+	if len(keys) > 0 {
+		for _, k := range keys {
+			keySet.Insert(k)
+		}
+	} else {
 		for k := range labelsMap {
-			keysToCheck = append(keysToCheck, k)
+			keySet.Insert(k)
 		}
 	}
+
+	keysToCheck := sets.List(keySet)
 
 	labelSet := labels.Set(labelsMap)
 	seen := make(map[types.NamespacedName]struct{})
@@ -485,6 +488,7 @@ func deviceProcessName(deploymentName, deviceName string) string {
 func selectorLabelKeys(selector *metav1.LabelSelector) sets.Set[string] {
 	keys := sets.New[string]()
 	if selector == nil {
+		keys.Insert(allSelectorIndexKey)
 		return keys
 	}
 
@@ -493,6 +497,10 @@ func selectorLabelKeys(selector *metav1.LabelSelector) sets.Set[string] {
 	}
 	for _, expr := range selector.MatchExpressions {
 		keys.Insert(expr.Key)
+	}
+
+	if len(keys) == 0 {
+		keys.Insert(allSelectorIndexKey)
 	}
 
 	return keys

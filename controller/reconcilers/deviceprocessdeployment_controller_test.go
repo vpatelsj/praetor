@@ -230,6 +230,68 @@ func TestRequestsForNetworkSwitchMatchesSelectors(t *testing.T) {
 	}
 }
 
+func TestMatchAllSelectorReconcilesAndCleansUp(t *testing.T) {
+	scheme := testScheme(t)
+	deployment := sampleDeployment("match-all", nil)
+	switchObj := networkSwitch("switch-1", nil)
+
+	indexFn := func(obj client.Object) []string {
+		dep, ok := obj.(*apiv1alpha1.DeviceProcessDeployment)
+		if !ok {
+			return nil
+		}
+		keys := selectorLabelKeys(&dep.Spec.Selector)
+		res := make([]string, 0, len(keys))
+		for k := range keys {
+			res = append(res, k)
+		}
+		return res
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(deployment, switchObj).
+		WithIndex(&apiv1alpha1.DeviceProcessDeployment{}, selectorKeysIndex, indexFn).
+		Build()
+
+	reconciler := &DeviceProcessDeploymentReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}}
+
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("initial reconcile returned error: %v", err)
+	}
+
+	var processes apiv1alpha1.DeviceProcessList
+	if err := cl.List(ctx, &processes, client.InNamespace(deployment.Namespace)); err != nil {
+		t.Fatalf("list deviceprocesses: %v", err)
+	}
+	if len(processes.Items) != 1 {
+		t.Fatalf("expected 1 DeviceProcess after initial reconcile, got %d", len(processes.Items))
+	}
+
+	if err := cl.Delete(ctx, switchObj); err != nil {
+		t.Fatalf("delete switch: %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile returned error: %v", err)
+	}
+
+	processes = apiv1alpha1.DeviceProcessList{}
+	if err := cl.List(ctx, &processes, client.InNamespace(deployment.Namespace)); err != nil {
+		t.Fatalf("list deviceprocesses after delete: %v", err)
+	}
+	if len(processes.Items) != 0 {
+		t.Fatalf("expected 0 DeviceProcesses after switch delete, got %d", len(processes.Items))
+	}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
