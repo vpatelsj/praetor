@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apollo-deviceprocess-controller
+  namespace: default
+  labels:
+    app: apollo-deviceprocess-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apollo-deviceprocess-controller
+  template:
+    metadata:
+      labels:
+        app: apollo-deviceprocess-controller
+    spec:
+      serviceAccountName: apollo-deviceprocess-controller
+      containers:
+      - name: manager
+        image: apollo-deviceprocess-controller:dev
+        imagePullPolicy: IfNotPresent
+        command:
+        - /manager
+        args:
+        - --metrics-bind-address=:8080
+        - --health-probe-bind-address=:8081
+        ports:
+        - containerPort: 8080
+          name: metrics
+        - containerPort: 8081
+          name: healthz
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081

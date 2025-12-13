@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: apollo-deviceprocess-gateway-role
+rules:
+- apiGroups: ["azure.com"]
+  resources: ["deviceprocesses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["azure.com"]
+  resources: ["deviceprocesses/status"]
+  verbs: ["get", "patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]

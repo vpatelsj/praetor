@@ -1,0 +1,333 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+  name: deviceprocesses.azure.com
+spec:
+  group: azure.com
+  names:
+    kind: DeviceProcess
+    listKind: DeviceProcessList
+    plural: deviceprocesses
+    singular: deviceprocess
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.deviceRef.name
+      name: DEVICE
+      type: string
+    - jsonPath: .spec.deviceRef.kind
+      name: KIND
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .status.artifactVersion
+      name: VERSION
+      type: string
+    - jsonPath: .status.restartCount
+      name: RESTARTS
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DeviceProcess is the Schema for the device processes API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DeviceProcessSpec defines the desired state of DeviceProcess.
+            properties:
+              artifact:
+                description: Artifact describes the artifact to fetch and run.
+                properties:
+                  checksumSHA256:
+                    description: ChecksumSHA256 is an optional SHA256 checksum for
+                      integrity verification.
+                    pattern: ^[A-Fa-f0-9]{64}$
+                    type: string
+                  type:
+                    description: Type of artifact reference (oci, http, file).
+                    enum:
+                    - oci
+                    - http
+                    - file
+                    type: string
+                  url:
+                    description: URL locates the artifact (registry reference, http(s)
+                      URL, or file path).
+                    minLength: 1
+                    type: string
+                required:
+                - type
+                - url
+                type: object
+              deviceRef:
+                description: DeviceRef points to the device where this process should
+                  run.
+                properties:
+                  kind:
+                    description: Kind is the device kind (Server, NetworkSwitch, SOC,
+                      BMC).
+                    enum:
+                    - Server
+                    - NetworkSwitch
+                    - SOC
+                    - BMC
+                    type: string
+                  name:
+                    description: Name of the device resource.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the device resource. Omit when using
+                      the same namespace.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              execution:
+                description: Execution describes how to execute the artifact.
+                properties:
+                  args:
+                    description: Args are appended to the command.
+                    items:
+                      type: string
+                    type: array
+                  backend:
+                    description: Backend is the execution mechanism (systemd, initd,
+                      container).
+                    enum:
+                    - systemd
+                    - initd
+                    - container
+                    type: string
+                  command:
+                    description: Command is the executable and required arguments.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  env:
+                    description: Env sets environment variables for the process.
+                    items:
+                      description: DeviceProcessEnvVar is a simple name/value environment
+                        variable.
+                      properties:
+                        name:
+                          description: Name of the variable.
+                          minLength: 1
+                          type: string
+                        value:
+                          description: Value assigned to the variable.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  user:
+                    description: User is the user to run the process as.
+                    type: string
+                  workingDir:
+                    description: WorkingDir sets the working directory for the process.
+                    type: string
+                required:
+                - backend
+                - command
+                type: object
+              healthCheck:
+                description: HealthCheck configures optional periodic health probes.
+                properties:
+                  exec:
+                    description: Exec is the exec action used for health checking.
+                    properties:
+                      command:
+                        description: Command to run for the health check.
+                        items:
+                          type: string
+                        minItems: 1
+                        type: array
+                    required:
+                    - command
+                    type: object
+                  failureThreshold:
+                    default: 3
+                    description: FailureThreshold is the number of consecutive failures
+                      to treat the process as unhealthy.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  periodSeconds:
+                    default: 30
+                    description: PeriodSeconds is the time between probes.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  successThreshold:
+                    default: 1
+                    description: SuccessThreshold is the minimum consecutive successes
+                      for the probe to be considered successful.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 5
+                    description: TimeoutSeconds is the probe timeout.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - exec
+                type: object
+              restartPolicy:
+                default: Always
+                description: RestartPolicy controls restart behavior.
+                enum:
+                - Always
+                - OnFailure
+                - Never
+                type: string
+            required:
+            - artifact
+            - deviceRef
+            - execution
+            type: object
+          status:
+            description: DeviceProcessStatus defines the observed state of DeviceProcess.
+            properties:
+              artifactVersion:
+                description: ArtifactVersion is the resolved artifact version (tag
+                  or digest).
+                type: string
+              conditions:
+                description: Conditions capture granular state transitions.
+                items:
+                  description: "Condition contains details for one aspect of the current
+                    state of this API Resource.\n---\nThis struct is intended for
+                    direct use as an array at the field path .status.conditions.  For
+                    example,\n\n\n\ttype FooStatus struct{\n\t    // Represents the
+                    observations of a foo's current state.\n\t    // Known .status.conditions.type
+                    are: \"Available\", \"Progressing\", and \"Degraded\"\n\t    //
+                    +patchMergeKey=type\n\t    // +patchStrategy=merge\n\t    // +listType=map\n\t
+                    \   // +listMapKey=type\n\t    Conditions []metav1.Condition `json:\"conditions,omitempty\"
+                    patchStrategy:\"merge\" patchMergeKey:\"type\" protobuf:\"bytes,1,rep,name=conditions\"`\n\n\n\t
+                    \   // other fields\n\t}"
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: |-
+                        type of condition in CamelCase or in foo.example.com/CamelCase.
+                        ---
+                        Many .condition.type values are consistent across resources like Available, but because arbitrary conditions can be
+                        useful (see .node.status.conditions), the ability to deconflict is important.
+                        The regex it matches is (dns1123SubdomainFmt/)?(qualifiedNameFmt)
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastTerminationReason:
+                description: LastTerminationReason describes why the process last
+                  exited.
+                type: string
+              lastTransitionTime:
+                description: LastTransitionTime is when the phase last changed.
+                format: date-time
+                type: string
+              observedSpecHash:
+                description: ObservedSpecHash tracks the last spec hash reported by
+                  the device agent.
+                type: string
+              phase:
+                description: Phase is a high-level summary of process state.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Unknown
+                type: string
+              pid:
+                description: PID is the process identifier on the target device.
+                format: int64
+                type: integer
+              restartCount:
+                description: RestartCount is the number of times the process has restarted.
+                format: int32
+                type: integer
+              startTime:
+                description: StartTime is when the process started.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

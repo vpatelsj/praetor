@@ -1,0 +1,24 @@
+apiVersion: azure.com/v1alpha1
+kind: DeviceProcessDeployment
+metadata:
+  name: firmware-upgrade
+spec:
+  selector:
+    matchLabels:
+      site: sfo
+      role: tor
+  template:
+    metadata:
+      labels:
+        app: logger
+    spec:
+      artifact:
+        type: oci
+        url: alpine:3.19
+      execution:
+        backend: container
+        command: ["/bin/sh", "-c"]
+        args: ["echo hello from ${APOLLO_DEVICE_NAME}; sleep 3600"]
+        env:
+        - name: APOLLO_DEVICE_NAME
+          value: ${APOLLO_DEVICE_NAME}
