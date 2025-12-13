@@ -131,7 +131,9 @@ func (a *agent) pollDesired(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	a.lastETag = etag
+	if etag != "" {
+		a.lastETag = etag
+	}
 
 	if !notModified && desired != nil && desired.HeartbeatIntervalSeconds > 0 {
 		a.heartbeat = time.Duration(desired.HeartbeatIntervalSeconds) * time.Second

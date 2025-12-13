@@ -1,96 +1,108 @@
 
+---
 
-## 🚨 P0: Your condition “changed” detection is wrong (breaks stale/disconnect + reconnect-with-empty-obs)
+## 🚨 P0: ETag handling is still wrong (agent will silently drop caching after first 304)
 
-In `gateway/server.go`:
+### What happens today
 
+* Gateway returns **304 Not Modified** without an `ETag` header (your `handleDesired()` returns early before setting it).
+* Agent’s `fetchDesired()` reads `etag := resp.Header.Get("ETag")` (empty on 304)
+* `pollDesired()` does `a.lastETag = etag` **unconditionally**
+* Result: after the first 304, the agent overwrites `lastETag` with `""`
+* Next poll: agent stops sending `If-None-Match` → gateway returns full `200` body every 5s forever
+
+This doesn’t hit the apiserver directly, but it **does**:
+
+* hammer the gateway CPU (json encode + spec hash)
+* hammer controller-runtime cache list calls
+* make your “scale the controller/gateway, not the apiserver” pitch look inconsistent
+
+### Fix (do both, belt + suspenders)
+
+**Gateway fix (preferred): set ETag even on 304**
+In `handleDesired()`, set the header before the 304 check:
 
 ```go
-func setAgentConnected(status *...DeviceProcessStatus, connected bool, reason, message string) bool {
-    before := conditions.FindCondition(status.Conditions, ConditionAgentConnected)
-    conditions.SetCondition(&status.Conditions, metav1.Condition{...})
-    after := conditions.FindCondition(status.Conditions, ConditionAgentConnected)
+w.Header().Set(desiredETagHeader, etag)
+if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && match == etag {
+    w.WriteHeader(http.StatusNotModified)
+    return
+}
+w.Header().Set("Content-Type", "application/json")
+_ = json.NewEncoder(w).Encode(desired)
+```
 
-    return before == nil || after == nil || before.Status != after.Status ...
+**Agent fix: never clear lastETag**
+In `pollDesired()`:
+
+```go
+if etag != "" {
+    a.lastETag = etag
 }
 ```
 
-Problem: `FindCondition` returns a **pointer to the element inside the slice**. Then `SetCondition` overwrites that same element in-place. So **`before` gets mutated** and ends up equal to `after`.
+(or make `fetchDesired()` return `a.lastETag` when header is empty)
 
-### What breaks in practice
-
-* `markDeviceDisconnected()` relies on `changed := setAgentConnected(..., false, ...)` and then:
-
-  ```go
-  if !changed { continue }
-  patch...
-  ```
-
-  After the first time AgentConnected exists, `changed` will almost always be **false** even when you flip True→False — so **you won’t patch status** and the device never becomes disconnected.
-
-* `markDeviceConnected()` has the same issue for False→True (reconnect) when there are **no observations** (e.g., agent restarts, desired 304, sends heartbeat only). Your `handleReport()` only calls `markDeviceConnected()` when `isStale`, but `markDeviceConnected()` may skip patch due to the same bug → device stays disconnected.
-
-### Fix (simple and correct)
-
-Capture a **copy** of the “before” condition (not a pointer into the slice) or have `SetCondition` return a boolean.
-
-Example fix inside `setAgentConnected`:
-
-```go
-func setAgentConnected(status *apiv1alpha1.DeviceProcessStatus, connected bool, reason, message string) bool {
-    desired := metav1.ConditionFalse
-    if connected { desired = metav1.ConditionTrue }
-
-    var beforeCopy *metav1.Condition
-    if c := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected); c != nil {
-        tmp := *c
-        beforeCopy = &tmp
-    }
-
-    conditions.SetCondition(&status.Conditions, metav1.Condition{
-        Type:    string(apiv1alpha1.ConditionAgentConnected),
-        Status:  desired,
-        Reason:  reason,
-        Message: message,
-    })
-
-    after := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected)
-    if beforeCopy == nil || after == nil {
-        return true
-    }
-    return beforeCopy.Status != after.Status || beforeCopy.Reason != after.Reason || beforeCopy.Message != after.Message
-}
-```
-
-Once you fix this, your stale loop + reconnect semantics will actually work.
+Until this is fixed, Step 3 is not “clean”.
 
 ---
 
-## ✅ What *is* in good shape now
+## ✅ Things that look good now (you really did address these)
 
-These look good and are “Step 3-grade”:
-
-* Agents **do not** touch Kubernetes; only HTTP to gateway ✅
-* Gateway indexes `spec.deviceRef.name` and lists with `MatchingFields` ✅
-* `handleReport()` only calls `markDeviceConnected()` on **stale→active transition** (nice scaling win) ✅
-* Staleness spam is fixed (stable disconnected message) ✅
-* Desired polling doesn’t keep devices alive unless there was a recent report (`recordDesiredHeartbeatIfEligible`) ✅
-* HMAC per-device token path exists (when secret configured), shared token fallback for dev ✅
-* Agent has separate tickers: desired every 5s, heartbeat every N seconds ✅
-* ETag preservation on 304 ✅
+* `setAgentConnected()` now copies the “before” condition → change detection works ✅
+* Stale/disconnect spam is fixed (stable disconnected message) ✅
+* `/report` only calls `markDeviceConnected()` on stale→active transition ✅ (big scaling win)
+* DeviceProcess spoofing is blocked: `proc.Spec.DeviceRef.Name != deviceName` → BadRequest ✅
+* You’re using `IndexField(... "spec.deviceRef.name")` and `MatchingFields` ✅
+* Status patch uses optimistic lock + retry loop ✅
+* Body size limit on `/report` ✅
+* Desired ordering is stable (sorted) + ETag computed from stable fields ✅
 
 ---
 
-## Other concerns 
+## Remaining “demo-risk” concerns (not blockers, but I’d tighten)
 
-1. **`markDeviceConnected()` calling `recordReport()` again**
-   You already call `recordReport()` in `handleReport()`. Double-write is harmless, just noise.
+### 1) Auth can still be accidentally “open”
 
-2. **`conditionsEqual()` is order-sensitive**
-   If condition ordering ever changes (later code paths), you can get extra patches. Not urgent for Step 3, but you may want to compare by Type map instead of slice index.
+In `authorize()`, if `authToken == ""` and `authSecret == ""`, you effectively allow everything.
 
-3. **Stale loop still lists every stale device every tick**
-   Even though it won’t patch repeatedly anymore, it will still `List()` each tick for stale devices. For Step 3 it’s fine; for scale you’ll want a “alreadyDisconnected” memory bit to avoid repeated lists.
+For the demo, make sure you **always** run with one of:
+
+* `--auth-secret` (device HMAC), OR
+* `--auth-token` (shared dev token)
+
+…and mention explicitly that this is **dev auth**, production will be mTLS/CSR.
+
+### 2) Condition comparison is order-sensitive
+
+`conditionsEqual()` compares by slice index, not by `Type`. Today your code paths keep order stable, so it’s okay for Step 3. Just be aware: later features can introduce patch churn if condition order changes.
 
 ---
 
+## Can you close Step 3 now?
+
+**Not yet.** You’re one small PR away.
+
+✅ You fixed the correctness blockers around condition updates, stale handling, device binding, indexing, and conflict safety.
+
+❌ But the ETag/cache regression means your agents will “look efficient” for ~one cycle and then start full-polling forever. That’s the kind of thing a skeptical reviewer will notice in logs/metrics during a demo.
+
+Once you apply the ETag fix (gateway + agent), **then yes — I’d call Step 3 closed** for an MVP demo.
+
+---
+
+## Quick demo checklist (so you don’t get surprised live)
+
+1. Start gateway with auth enabled.
+2. Start 2–5 agents in docker compose.
+3. Apply a new `DeviceProcess` for one device and show:
+
+   * within ~5s: `AgentConnected=True`, `SpecObserved=True`, `ObservedSpecHash=...`
+4. Stop one agent:
+
+   * after stale window: `AgentConnected=False` flips and **only one** warning event per DP
+5. Watch gateway logs:
+
+   * ensure you see lots of `304` for `/desired` (after the ETag fix), not nonstop `200`
+
+If you want, paste just the diff you made around `handleDesired()` + `pollDesired()` and I’ll do a final “ship/no-ship” read in one pass.

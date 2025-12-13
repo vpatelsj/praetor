@@ -240,13 +240,14 @@ func (g *Gateway) handleDesired(ctx context.Context, w http.ResponseWriter, r *h
 
 	g.recordDesiredHeartbeatIfEligible(deviceName)
 
+	w.Header().Set(desiredETagHeader, etag)
+
 	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set(desiredETagHeader, etag)
 	if err := json.NewEncoder(w).Encode(desired); err != nil {
 		g.log.Error(err, "encode desired response", "device", deviceName)
 	}
