@@ -5,6 +5,7 @@ import (
 	"os"
 
 	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
+	"github.com/apollo/praetor/controller/reconcilers"
 	"github.com/apollo/praetor/pkg/log"
 	"github.com/apollo/praetor/pkg/version"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -45,6 +46,17 @@ func main() {
 	})
 	if err != nil {
 		logger.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	reconciler := reconcilers.NewDeviceProcessDeploymentReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		mgr.GetEventRecorderFor("deviceprocess-controller"),
+	)
+
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		logger.Error(err, "unable to create controller", "controller", "DeviceProcessDeployment")
 		os.Exit(1)
 	}
 

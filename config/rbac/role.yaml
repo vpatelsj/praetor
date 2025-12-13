@@ -33,12 +33,12 @@ rules:
   - deviceprocesses
   - deviceprocessdeployments
   verbs:
-  - create
   - get
   - list
   - watch
-  - update
+  - create
   - patch
+  - delete
 - apiGroups:
   - azure.com
   resources:
@@ -46,5 +46,18 @@ rules:
   - deviceprocessdeployments/status
   verbs:
   - get
-  - update
+- apiGroups:
+  - azure.com
+  resources:
+  - networkswitches
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
   - patch

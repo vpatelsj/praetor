@@ -1,173 +1,138 @@
-Here’s a Copilot prompt for **Step 1 (API-first CRDs)** that’s tight, explicit, and keeps you from accidentally drifting into Step 2 logic.
+Here’s a Copilot prompt for **Step 2 (Minimal Controller: Deployment ⇒ Processes)** that’s explicit about boundaries (SSA, no status writes, no rollout logic), and gives you a clean vertical slice starting with **NetworkSwitch** inventory only.
 
 ---
 
-## Copilot Prompt — Step 1: CRDs (API-first)
+## Copilot Prompt — Step 2: Minimal Controller (Deployment ⇒ Processes, DaemonSet semantics)
 
-Read the repo and implement **Step 1: finalize CRD APIs** for `DeviceProcess` and `DeviceProcessDeployment` under `api/azure.com/v1alpha1`. This step is **API-only**: define types, markers, validations, defaults, printcolumns, and sample YAMLs. **Do not implement any controller reconciliation logic or agent behavior**.
+Implement **Step 2** in this repo: a minimal Kubernetes controller that reconciles `DeviceProcessDeployment` into per-device `DeviceProcess` objects (DaemonSet semantics). This is the **controller only**. Do NOT implement rollout batching, health checks, artifact download, or agent execution. The controller must **never write `DeviceProcess.status`**.
 
-### Goals
+### Scope / Goals
 
-1. CRDs have the full spec + status shape we agreed on.
-2. `make generate && make manifests` produces clean CRDs.
-3. `kubectl get/describe` looks good from printcolumns + docs, even if nothing runs.
+* Watch `DeviceProcessDeployment` resources.
+* List device inventory CRDs for **one device kind only to start**: `NetworkSwitch` (assume it exists in-cluster).
+* Match devices using `.spec.selector` (LabelSelector).
+* For each matched device, **create or patch** a `DeviceProcess` that represents the desired workload on that device.
+* Ensure garbage collection / cleanup when selector changes or deployment is deleted.
 
----
+### Assumptions (for now)
 
-## Requirements
+* `NetworkSwitch` CRD exists and is namespaced.
+* It has standard `metadata.labels`.
+* We can access it via a typed client or (if no Go types exist) via `unstructured.Unstructured` with GVK:
 
-### 1) DeviceProcess API
-
-Implement these Go types in `api/azure.com/v1alpha1/deviceprocess_types.go` (or equivalent) with kubebuilder markers + validation.
-
-#### Spec fields (required unless stated optional)
-
-* `spec.deviceRef`:
-
-  * `kind` (string, required; enum: `Server`, `NetworkSwitch`, `SOC`, `BMC`)
-  * `name` (string, required)
-  * optional `namespace` (string, omit if always same namespace)
-* `spec.artifact`:
-
-  * `type` (string enum: `oci`, `http`, `file`)
-  * `url` (string, required, must be non-empty)
-  * optional `checksumSHA256` (string; if provided must be 64 hex chars)
-* `spec.execution`:
-
-  * `backend` (string enum: `systemd`, `initd`, `container`)
-  * `command` (`[]string`, required, minItems=1)
-  * optional `args` (`[]string`)
-  * optional `env` (`[]EnvVar` with `name` and `value`)
-  * optional `workingDir` (string)
-  * optional `user` (string)  (keep optional for now)
-* `spec.restartPolicy` (string enum: `Always`, `OnFailure`, `Never`; default `Always`)
-* `spec.healthCheck` (optional):
-
-  * support only `exec` for now:
-
-    * `exec.command` (`[]string`, minItems=1)
-  * `periodSeconds` (int32 default 30, min 1)
-  * `timeoutSeconds` (int32 default 5, min 1)
-  * `successThreshold` (int32 default 1, min 1)
-  * `failureThreshold` (int32 default 3, min 1)
-
-#### Status fields
-
-* `status.phase` (enum string: `Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`)
-* `status.conditions` (`[]metav1.Condition`)
-* `status.artifactVersion` (string, optional; typically tag/digest)
-* `status.pid` (int64, optional)
-* `status.startTime` (`*metav1.Time`, optional)
-* `status.lastTransitionTime` (optional if you want, but conditions should carry timestamps)
-* `status.restartCount` (int32, optional)
-* `status.lastTerminationReason` (string, optional)
-
-#### Kubebuilder markers / UX
-
-* Enable status subresource
-* Add printcolumns similar to:
-
-  * DEVICE = `.spec.deviceRef.name`
-  * KIND = `.spec.deviceRef.kind`
-  * PHASE = `.status.phase`
-  * VERSION = `.status.artifactVersion`
-  * RESTARTS = `.status.restartCount`
-  * AGE = `.metadata.creationTimestamp`
-
-Add godoc comments on fields so `kubectl describe` is understandable.
+  * Group: `azure.com`
+  * Version: `v1alpha1`
+  * Kind: `NetworkSwitch`
+  * Resource: `networkswitches` (if unsure, discover from RESTMapper dynamically)
+* The `DeviceProcessDeployment` is namespaced; create `DeviceProcess` objects in the **same namespace**.
 
 ---
 
-### 2) DeviceProcessDeployment API
+## Implementation Requirements
 
-Implement in `api/azure.com/v1alpha1/deviceprocessdeployment_types.go` with validation and printcolumns.
+### 1) Controller wiring
 
-#### Spec fields
+* Add controller manager wiring under `controller/main.go` (or new files under `controller/`):
 
-* `spec.selector` (required): `metav1.LabelSelector`
-* `spec.updateStrategy`:
+  * register scheme for our CRDs
+  * set up controller-runtime manager
+  * register a reconciler for `DeviceProcessDeployment`
 
-  * `type` enum: `RollingUpdate`, `Recreate` (default `RollingUpdate`)
-  * if RollingUpdate:
+### 2) Reconciler behavior (core)
 
-    * `rollingUpdate.maxUnavailable`:
+For each `DeviceProcessDeployment`:
 
-      * allow either `int` or percentage string (use `intstr.IntOrString`)
-      * default `10%`
-* `spec.template` (required):
+1. Convert `.spec.selector` into a label selector and **list matching NetworkSwitch objects** in the same namespace.
+2. For each matched NetworkSwitch named `<deviceName>`:
 
-  * `metadata`:
+   * Compute the `DeviceProcess` name:
 
-    * `labels` map[string]string (optional but should exist so controller can copy later)
-  * `spec` should embed a **DeviceProcessTemplateSpec** (same fields as `DeviceProcessSpec` *except* `deviceRef`)
+     * prefer stable: `<deploymentName>-<deviceName>`
+     * if that exceeds DNS1123 label limits, use `<deploymentName>-<hash(deviceName)>` (keep deterministic)
+   * Build desired `DeviceProcess` **spec** from deployment `.spec.template.spec` plus `deviceRef`:
 
-Important: Do NOT bake in any “inventory CRD” dependencies here; the selector is just labels.
+     * `spec.deviceRef.kind = "NetworkSwitch"`
+     * `spec.deviceRef.name = <deviceName>`
+   * Apply labels to DeviceProcess:
 
-#### Status fields
+     * `app: <deploymentName>`
+     * copy a **safe subset** of device labels (or all labels) — but ensure we don’t exceed label size limits; at minimum keep device labels that drive queries (e.g. `role`, `type`, `rack`)
+3. Ensure `ownerReferences` is set to the `DeviceProcessDeployment` so deletion GC works.
+4. **Delete stale DeviceProcess objects** that belong to this deployment but no longer match the selector:
 
-* `status.observedGeneration` (int64)
-* Counters (int32):
+   * Identify owned DeviceProcesses via:
 
-  * `desiredNumberScheduled`
-  * `currentNumberScheduled`
-  * `updatedNumberScheduled`
-  * `numberReady`
-  * `numberAvailable`
-  * `numberUnavailable`
-* `status.conditions` (`[]metav1.Condition`), with planned condition types like:
+     * label `app=<deploymentName>` AND ownerRef UID, OR
+     * label like `deviceprocessdeployment=<deploymentName>` (add this label)
+   * If a previously created DeviceProcess corresponds to a device no longer selected, delete it.
 
-  * `Available`, `Progressing`
+### 3) Server-Side Apply (SSA) for spec ownership
 
-#### Printcolumns for `kubectl get deviceprocessdeployment`
+* Use **Server-Side Apply** when creating/updating `DeviceProcess.spec`, so the controller and agent can manage different fields without stomping:
 
-* DESIRED, CURRENT, READY, AVAILABLE, UNAVAILABLE, AGE
+  * Use a consistent field manager name: `"deviceprocess-controller"`
+  * Use `ForceOwnership=false` by default (do NOT steal fields from agent)
+  * Only apply `metadata.labels`, `metadata.ownerReferences`, and `spec` (not status)
+* The reconciler should be idempotent: repeated reconciles produce no changes if nothing changed.
+
+### 4) Never write status
+
+* Do not set `.status` on `DeviceProcess`.
+* You MAY update `.status.observedGeneration` on the **DeviceProcessDeployment** later in Step 7; for Step 2, it’s OK to not update deployment status at all.
+
+### 5) Events + logging
+
+* Log key actions:
+
+  * how many devices matched
+  * created / updated / deleted counts
+* Emit Kubernetes events on the `DeviceProcessDeployment` for:
+
+  * “CreatedDeviceProcess”
+  * “DeletedDeviceProcess”
+    (Keep event spam bounded: only emit per reconcile summary or only on changes.)
+
+### 6) RBAC
+
+Add the kubebuilder RBAC markers (or explicit RBAC yaml) so the controller can:
+
+* get/list/watch DeviceProcessDeployments
+* create/patch/delete/get/list/watch DeviceProcesses
+* get/list/watch NetworkSwitch inventory objects
+* create events
+
+### 7) Tests (minimum viable)
+
+Add unit tests using envtest or fake client:
+
+* Reconcile creates N DeviceProcesses when N NetworkSwitch match selector.
+* Changing selector deletes stale DeviceProcesses.
+* Deleting deployment leads to GC via ownerRef (at least verify ownerRef is set correctly; optional: simulate deletion).
 
 ---
 
-### 3) Defaults + validation
+## Deliverables / Definition of Done
 
-* Add kubebuilder defaults + validation markers where sensible:
-
-  * enums, minItems, minimums, patterns (sha256)
-  * defaults for restartPolicy + health thresholds + rollingUpdate maxUnavailable
-
----
-
-### 4) Samples
-
-Update `config/samples/` to include:
-
-* `azure_v1alpha1_deviceprocess.yaml` showing a realistic systemd example
-* `azure_v1alpha1_deviceprocessdeployment.yaml` showing selector + template + rollingUpdate 10%
-
-Samples should match the API and validate under the CRDs.
+* `kubectl apply -f <deployment sample>` creates N `DeviceProcess` objects for matching NetworkSwitches.
+* `kubectl delete deviceprocessdeployment <name>` results in DeviceProcesses being garbage collected (ownerRef).
+* Changing selector changes created/deleted DeviceProcesses accordingly.
+* Controller uses SSA and never touches DeviceProcess status.
 
 ---
 
-### 5) DoD checks
+## Output requested
 
-After changes, ensure:
+After implementation, show:
 
-* `make fmt vet test generate manifests build` all succeed
-* `kubectl apply -f config/crd/bases` works
-* `kubectl apply -f config/samples` works
-* `kubectl get deviceprocess` and `kubectl get deviceprocessdeployment` show the new columns
-
----
-
-### Output
-
-Provide:
-
-* file list of changed/added files
-* full content of the two types files and updated sample YAMLs
+* list of new/modified files
+* the reconciler code in full
+* any RBAC markers or YAML
+* how to run locally (make targets) and a quick manual demo command sequence
 
 Constraints:
 
-* API-only. No controller logic, no agent logic, no new reconcilers.
-* Keep types minimal and stable; prefer adding optional fields over complexity.
-* Use `metav1.Condition` for conditions (don’t invent a custom condition struct).
+* No rollout batching or update strategy logic yet.
+* No querying multiple device kinds yet (NetworkSwitch only).
+* Keep naming deterministic, safe (DNS1123), and stable.
 
 ---
-
-If you want, I can also give you a tiny “API review checklist” to run after Copilot finishes (things like “avoid pointer slices”, “prefer int32 for counters”, “don’t forget DeepCopy markers”, etc.).

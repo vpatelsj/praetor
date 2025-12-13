@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
 - azure_v1alpha1_deviceprocess.yaml
 - azure_v1alpha1_deviceprocessdeployment.yaml
+- azure_v1alpha1_networkswitch.yaml
