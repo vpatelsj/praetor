@@ -38,6 +38,7 @@ type agent struct {
 	lastETag          string
 	lastObserved      map[string]string
 	heartbeat         time.Duration
+	rnd               *rand.Rand
 }
 
 func main() {
@@ -74,6 +75,7 @@ func main() {
 		logger:            logger,
 		lastObserved:      make(map[string]string),
 		heartbeat:         time.Duration(defaultHeartbeatSeconds) * time.Second,
+		rnd:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	logger.Info("agent starting", "device", deviceName, "gateway", gatewayURL, "version", version.Version, "commit", version.Commit)
@@ -106,7 +108,7 @@ func (a *agent) run(ctx context.Context) error {
 		case <-desiredTicker.C:
 			if err := a.pollDesired(ctx); err != nil {
 				a.logger.Error(err, "poll desired failed")
-				sleepWithJitter(ctx, backoff)
+				a.sleepWithJitter(ctx, backoff)
 				backoff = nextBackoff(backoff)
 				continue
 			}
@@ -114,7 +116,7 @@ func (a *agent) run(ctx context.Context) error {
 		case <-heartbeatTicker.C:
 			if err := a.sendReport(ctx, nil); err != nil {
 				a.logger.Error(err, "heartbeat report failed")
-				sleepWithJitter(ctx, backoff)
+				a.sleepWithJitter(ctx, backoff)
 				backoff = nextBackoff(backoff)
 				continue
 			}
@@ -261,8 +263,8 @@ func (a *agent) computeDeviceToken() string {
 	return a.deviceToken
 }
 
-func sleepWithJitter(ctx context.Context, base time.Duration) {
-	jitter := time.Duration(rand.Int63n(int64(250 * time.Millisecond)))
+func (a *agent) sleepWithJitter(ctx context.Context, base time.Duration) {
+	jitter := time.Duration(a.rnd.Int63n(int64(250 * time.Millisecond)))
 	d := base + jitter
 	select {
 	case <-time.After(d):
