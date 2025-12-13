@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strings"
 
 	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
@@ -20,16 +21,23 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
-	fieldManagerName           = "deviceprocess-controller"
-	deviceProcessDeploymentKey = "deviceprocessdeployment"
+	fieldManagerName              = "deviceprocess-controller"
+	deviceProcessDeploymentKey    = "deviceprocessdeployment"
 	deviceProcessDeploymentUIDKey = "deviceprocessdeployment-uid"
+	selectorKeysIndex             = "selectorKeys"
 )
 
 //+kubebuilder:rbac:groups=azure.com,resources=deviceprocessdeployments,verbs=get;list;watch
@@ -57,8 +65,63 @@ func NewDeviceProcessDeploymentReconciler(c client.Client, scheme *runtime.Schem
 
 // SetupWithManager wires the reconciler into the controller manager.
 func (r *DeviceProcessDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	ctx := context.Background()
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &apiv1alpha1.DeviceProcessDeployment{}, selectorKeysIndex, func(obj client.Object) []string {
+		dep, ok := obj.(*apiv1alpha1.DeviceProcessDeployment)
+		if !ok {
+			return nil
+		}
+		keys := selectorLabelKeys(&dep.Spec.Selector)
+		result := make([]string, 0, len(keys))
+		for k := range keys {
+			result = append(result, k)
+		}
+		return result
+	}); err != nil {
+		return err
+	}
+
+	networkSwitch := &unstructured.Unstructured{}
+	networkSwitch.SetGroupVersionKind(schema.GroupVersionKind{Group: "azure.com", Version: "v1alpha1", Kind: "NetworkSwitch"})
+
+	networkSwitchPredicate := predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return true },
+		DeleteFunc: func(e event.DeleteEvent) bool { return true },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldObj := e.ObjectOld
+			newObj := e.ObjectNew
+			if oldObj == nil || newObj == nil {
+				return true
+			}
+			labelsChanged := !reflect.DeepEqual(oldObj.GetLabels(), newObj.GetLabels())
+			annotationsChanged := !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations())
+			generationChanged := oldObj.GetGeneration() != newObj.GetGeneration()
+			return labelsChanged || annotationsChanged || generationChanged
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&apiv1alpha1.DeviceProcessDeployment{}).
+		Watches(networkSwitch, handler.Funcs{
+			CreateFunc: func(c context.Context, e event.CreateEvent, q workqueue.RateLimitingInterface) {
+				for _, req := range r.requestsForNetworkSwitch(c, e.Object) {
+					q.Add(req)
+				}
+			},
+			UpdateFunc: func(c context.Context, e event.UpdateEvent, q workqueue.RateLimitingInterface) {
+				for _, req := range r.requestsForNetworkSwitch(c, e.ObjectOld) {
+					q.Add(req)
+				}
+				for _, req := range r.requestsForNetworkSwitch(c, e.ObjectNew) {
+					q.Add(req)
+				}
+			},
+			DeleteFunc: func(c context.Context, e event.DeleteEvent, q workqueue.RateLimitingInterface) {
+				for _, req := range r.requestsForNetworkSwitch(c, e.Object) {
+					q.Add(req)
+				}
+			},
+		}, builder.WithPredicates(networkSwitchPredicate)).
 		Complete(r)
 }
 
@@ -230,6 +293,52 @@ func (r *DeviceProcessDeploymentReconciler) cleanupStale(ctx context.Context, de
 	return deleted, nil
 }
 
+func (r *DeviceProcessDeploymentReconciler) requestsForNetworkSwitch(ctx context.Context, obj client.Object) []reconcile.Request {
+	switchObj, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+
+	labelsMap := switchObj.GetLabels()
+	if len(labelsMap) == 0 {
+		return nil
+	}
+
+	labelSet := labels.Set(labelsMap)
+	seen := make(map[types.NamespacedName]struct{})
+	requests := make([]reconcile.Request, 0)
+
+	for key := range labelsMap {
+		var deployments apiv1alpha1.DeviceProcessDeploymentList
+		if err := r.List(ctx, &deployments,
+			client.InNamespace(switchObj.GetNamespace()),
+			client.MatchingFields{selectorKeysIndex: key},
+		); err != nil {
+			log.FromContext(ctx).Error(err, "list deployments for switch", "key", key)
+			continue
+		}
+
+		for i := range deployments.Items {
+			dep := deployments.Items[i]
+			selector, err := metav1.LabelSelectorAsSelector(&dep.Spec.Selector)
+			if err != nil {
+				continue
+			}
+			if !selector.Matches(labelSet) {
+				continue
+			}
+			nn := types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}
+			if _, exists := seen[nn]; exists {
+				continue
+			}
+			seen[nn] = struct{}{}
+			requests = append(requests, reconcile.Request{NamespacedName: nn})
+		}
+	}
+
+	return requests
+}
+
 func (r *DeviceProcessDeploymentReconciler) listNetworkSwitches(ctx context.Context, namespace string, selector labels.Selector) ([]unstructured.Unstructured, error) {
 	list := &unstructured.UnstructuredList{}
 	gvk := schema.GroupVersion{Group: "azure.com", Version: "v1alpha1"}.WithKind("NetworkSwitchList")
@@ -256,8 +365,8 @@ func buildDesiredDeviceProcess(ctx context.Context, deployment *apiv1alpha1.Devi
 	selector := deployment.Spec.Selector
 
 	labels := mergeStringMaps(template.Metadata.Labels, map[string]string{
-		"app":                      deployment.Name,
-		deviceProcessDeploymentKey: deployment.Name,
+		"app":                         deployment.Name,
+		deviceProcessDeploymentKey:    deployment.Name,
 		deviceProcessDeploymentUIDKey: string(deployment.UID),
 	})
 	labels = mergeStringMaps(labels, selectedDeviceLabels(ctx, device.GetLabels(), &selector))

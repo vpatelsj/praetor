@@ -2,8 +2,8 @@ package reconcilers
 
 import (
 	"context"
-	"testing"
 	"strings"
+	"testing"
 
 	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func TestReconcileCreatesDeviceProcesses(t *testing.T) {
@@ -148,9 +149,9 @@ func TestUpsertWithoutSSAUpdatesExistingWithoutDroppingMetadata(t *testing.T) {
 	scheme := testScheme(t)
 	existing := &apiv1alpha1.DeviceProcess{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dpd-device",
-			Namespace: "default",
-			Labels:    map[string]string{"agent": "keep"},
+			Name:        "dpd-device",
+			Namespace:   "default",
+			Labels:      map[string]string{"agent": "keep"},
 			Annotations: map[string]string{"agent": "keep"},
 		},
 		Spec: apiv1alpha1.DeviceProcessSpec{},
@@ -185,6 +186,47 @@ func TestUpsertWithoutSSAUpdatesExistingWithoutDroppingMetadata(t *testing.T) {
 	}
 	if updated.Labels["controller"] != "set" || updated.Annotations["controller"] != "set" {
 		t.Fatalf("controller metadata not applied")
+	}
+}
+
+func TestRequestsForNetworkSwitchMatchesSelectors(t *testing.T) {
+	scheme := testScheme(t)
+	deployment := sampleDeployment("dpd", map[string]string{"role": "leaf", "rack": "r1"})
+	switchObj := networkSwitch("leaf-a", map[string]string{"role": "leaf", "rack": "r1"})
+
+	indexFn := func(obj client.Object) []string {
+		dep, ok := obj.(*apiv1alpha1.DeviceProcessDeployment)
+		if !ok {
+			return nil
+		}
+		keys := selectorLabelKeys(&dep.Spec.Selector)
+		res := make([]string, 0, len(keys))
+		for k := range keys {
+			res = append(res, k)
+		}
+		return res
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(deployment).
+		WithIndex(&apiv1alpha1.DeviceProcessDeployment{}, selectorKeysIndex, indexFn).
+		Build()
+
+	reconciler := &DeviceProcessDeploymentReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	reqs := reconciler.requestsForNetworkSwitch(context.Background(), switchObj)
+
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	expected := reconcile.Request{NamespacedName: types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}}
+	if reqs[0] != expected {
+		t.Fatalf("unexpected request: %+v", reqs[0])
 	}
 }
 
