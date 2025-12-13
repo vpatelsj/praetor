@@ -1,97 +1,173 @@
-Cool — here’s an updated **Copilot prompt** tuned for **plain `go build`** (no goreleaser), with separate controller + agent binaries.
+Here’s a Copilot prompt for **Step 1 (API-first CRDs)** that’s tight, explicit, and keeps you from accidentally drifting into Step 2 logic.
 
 ---
 
-### Copilot Prompt — Step 0 (Foundations, go build)
+## Copilot Prompt — Step 1: CRDs (API-first)
 
-Bootstrap a Kubernetes-native Go project for “Apollo DeviceProcess” with CRDs + controller + agent skeleton. This is **Step 0: foundations only**. Use **plain `go build`** for binaries.
+Read the repo and implement **Step 1: finalize CRD APIs** for `DeviceProcess` and `DeviceProcessDeployment` under `api/azure.com/v1alpha1`. This step is **API-only**: define types, markers, validations, defaults, printcolumns, and sample YAMLs. **Do not implement any controller reconciliation logic or agent behavior**.
 
-## Goals
+### Goals
 
-* Create a clean repo layout, codegen, CRD generation, and build/test targets.
-* Everything compiles and runs (controller prints startup logs; agent prints startup logs).
-* No rollout logic, no artifact download, no systemd/initd/container execution yet.
+1. CRDs have the full spec + status shape we agreed on.
+2. `make generate && make manifests` produces clean CRDs.
+3. `kubectl get/describe` looks good from printcolumns + docs, even if nothing runs.
 
-## Repo layout to create
+---
 
-* `api/azure.com/v1alpha1/` : CRD Go types (`DeviceProcess`, `DeviceProcessDeployment`) + deepcopy
-* `controller/` : controller manager entrypoint using controller-runtime
-* `agent/` : agent entrypoint (no k8s watch yet)
-* `pkg/conditions/` : shared helpers for Conditions
-* `pkg/version/` : version info (string vars)
-* `pkg/log/` : zap logger setup helper
-* `config/` : kubebuilder-style manifests (`crd/`, `rbac/`, `manager/`, `default/`, `samples/`)
-* `hack/` : scripts if needed
+## Requirements
 
-## Tooling / deps
+### 1) DeviceProcess API
 
-* Use `sigs.k8s.io/controller-runtime` + k8s apimachinery/apimachinery.
-* Use `controller-gen` for CRD + RBAC generation.
-* Ensure versions are consistent (no mixed major versions).
+Implement these Go types in `api/azure.com/v1alpha1/deviceprocess_types.go` (or equivalent) with kubebuilder markers + validation.
 
-## API conventions
+#### Spec fields (required unless stated optional)
 
-* CRDs under group/version: `azure.com/v1alpha1`
-* Add kubebuilder markers:
+* `spec.deviceRef`:
 
-  * `+kubebuilder:object:root=true`
-  * `+kubebuilder:subresource:status`
-  * `+kubebuilder:resource:scope=Namespaced`
-  * `+kubebuilder:printcolumn` (placeholders ok)
-* Define enums/constants:
+  * `kind` (string, required; enum: `Server`, `NetworkSwitch`, `SOC`, `BMC`)
+  * `name` (string, required)
+  * optional `namespace` (string, omit if always same namespace)
+* `spec.artifact`:
 
-  * DeviceProcess phases: `Pending, Running, Succeeded, Failed, Unknown`
-  * Condition types: `ArtifactDownloaded, ProcessStarted, Healthy, AgentConnected`
-* In `pkg/conditions`, implement helpers:
+  * `type` (string enum: `oci`, `http`, `file`)
+  * `url` (string, required, must be non-empty)
+  * optional `checksumSHA256` (string; if provided must be 64 hex chars)
+* `spec.execution`:
 
-  * `FindCondition`, `SetCondition`, `MarkTrue`, `MarkFalse`
-  * `LastTransitionTime` should only change when Status changes
+  * `backend` (string enum: `systemd`, `initd`, `container`)
+  * `command` (`[]string`, required, minItems=1)
+  * optional `args` (`[]string`)
+  * optional `env` (`[]EnvVar` with `name` and `value`)
+  * optional `workingDir` (string)
+  * optional `user` (string)  (keep optional for now)
+* `spec.restartPolicy` (string enum: `Always`, `OnFailure`, `Never`; default `Always`)
+* `spec.healthCheck` (optional):
 
-## Entrypoints
+  * support only `exec` for now:
 
-* `controller/main.go`:
+    * `exec.command` (`[]string`, minItems=1)
+  * `periodSeconds` (int32 default 30, min 1)
+  * `timeoutSeconds` (int32 default 5, min 1)
+  * `successThreshold` (int32 default 1, min 1)
+  * `failureThreshold` (int32 default 3, min 1)
 
-  * starts a controller-runtime manager
-  * registers scheme for our API types
-  * logs startup and exits on signal
-  * **no reconcilers required yet** (stub ok)
-* `agent/main.go`:
+#### Status fields
 
-  * simple flags/env parsing (`--device-id`, `--kubeconfig` optional)
-  * logs “agent starting” and blocks (or exits cleanly)
+* `status.phase` (enum string: `Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`)
+* `status.conditions` (`[]metav1.Condition`)
+* `status.artifactVersion` (string, optional; typically tag/digest)
+* `status.pid` (int64, optional)
+* `status.startTime` (`*metav1.Time`, optional)
+* `status.lastTransitionTime` (optional if you want, but conditions should carry timestamps)
+* `status.restartCount` (int32, optional)
+* `status.lastTerminationReason` (string, optional)
 
-## Build & Makefile
+#### Kubebuilder markers / UX
 
-Provide Makefile targets using **go build**:
+* Enable status subresource
+* Add printcolumns similar to:
 
-* `make fmt` -> `go fmt ./...`
-* `make vet` -> `go vet ./...`
-* `make test` -> `go test ./...`
-* `make generate` -> run controller-gen for deepcopy + object generation
-* `make manifests` -> controller-gen CRD + RBAC output into `config/crd/bases` and `config/rbac`
-* `make build` -> builds:
+  * DEVICE = `.spec.deviceRef.name`
+  * KIND = `.spec.deviceRef.kind`
+  * PHASE = `.status.phase`
+  * VERSION = `.status.artifactVersion`
+  * RESTARTS = `.status.restartCount`
+  * AGE = `.metadata.creationTimestamp`
 
-  * `bin/apollo-deviceprocess-controller` from `./controller`
-  * `bin/apollo-deviceprocess-agent` from `./agent`
+Add godoc comments on fields so `kubectl describe` is understandable.
 
-Include a `tools.go` pattern or Makefile download logic so `controller-gen` is available (preferred: `tools.go` + `go install` via Makefile).
+---
 
-## Config
+### 2) DeviceProcessDeployment API
 
-* kustomize structure under `config/` sufficient so `make manifests` produces CRDs.
-* Add minimal sample YAMLs under `config/samples/` for both CRDs.
+Implement in `api/azure.com/v1alpha1/deviceprocessdeployment_types.go` with validation and printcolumns.
 
-## README
+#### Spec fields
 
-* Provide minimal README with dev loop:
+* `spec.selector` (required): `metav1.LabelSelector`
+* `spec.updateStrategy`:
 
-  * `make generate && make manifests && make test && make build`
+  * `type` enum: `RollingUpdate`, `Recreate` (default `RollingUpdate`)
+  * if RollingUpdate:
 
-## Output format
+    * `rollingUpdate.maxUnavailable`:
 
-At the end, show:
+      * allow either `int` or percentage string (use `intstr.IntOrString`)
+      * default `10%`
+* `spec.template` (required):
 
-1. the final file tree
-2. full contents of: `go.mod`, `Makefile`, `api/azure.com/v1alpha1/*.go`, `pkg/conditions/conditions.go`, `controller/main.go`, `agent/main.go`, and README.
+  * `metadata`:
 
-Constraints: keep it minimal and idiomatic. Don’t implement business logic beyond scaffolding.
+    * `labels` map[string]string (optional but should exist so controller can copy later)
+  * `spec` should embed a **DeviceProcessTemplateSpec** (same fields as `DeviceProcessSpec` *except* `deviceRef`)
+
+Important: Do NOT bake in any “inventory CRD” dependencies here; the selector is just labels.
+
+#### Status fields
+
+* `status.observedGeneration` (int64)
+* Counters (int32):
+
+  * `desiredNumberScheduled`
+  * `currentNumberScheduled`
+  * `updatedNumberScheduled`
+  * `numberReady`
+  * `numberAvailable`
+  * `numberUnavailable`
+* `status.conditions` (`[]metav1.Condition`), with planned condition types like:
+
+  * `Available`, `Progressing`
+
+#### Printcolumns for `kubectl get deviceprocessdeployment`
+
+* DESIRED, CURRENT, READY, AVAILABLE, UNAVAILABLE, AGE
+
+---
+
+### 3) Defaults + validation
+
+* Add kubebuilder defaults + validation markers where sensible:
+
+  * enums, minItems, minimums, patterns (sha256)
+  * defaults for restartPolicy + health thresholds + rollingUpdate maxUnavailable
+
+---
+
+### 4) Samples
+
+Update `config/samples/` to include:
+
+* `azure_v1alpha1_deviceprocess.yaml` showing a realistic systemd example
+* `azure_v1alpha1_deviceprocessdeployment.yaml` showing selector + template + rollingUpdate 10%
+
+Samples should match the API and validate under the CRDs.
+
+---
+
+### 5) DoD checks
+
+After changes, ensure:
+
+* `make fmt vet test generate manifests build` all succeed
+* `kubectl apply -f config/crd/bases` works
+* `kubectl apply -f config/samples` works
+* `kubectl get deviceprocess` and `kubectl get deviceprocessdeployment` show the new columns
+
+---
+
+### Output
+
+Provide:
+
+* file list of changed/added files
+* full content of the two types files and updated sample YAMLs
+
+Constraints:
+
+* API-only. No controller logic, no agent logic, no new reconcilers.
+* Keep types minimal and stable; prefer adding optional fields over complexity.
+* Use `metav1.Condition` for conditions (don’t invent a custom condition struct).
+
+---
+
+If you want, I can also give you a tiny “API review checklist” to run after Copilot finishes (things like “avoid pointer slices”, “prefer int32 for counters”, “don’t forget DeepCopy markers”, etc.).

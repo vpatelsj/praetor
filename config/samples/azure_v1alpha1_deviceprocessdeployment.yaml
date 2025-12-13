@@ -1,9 +1,38 @@
 apiVersion: azure.com/v1alpha1
 kind: DeviceProcessDeployment
 metadata:
-  name: sample-deviceprocessdeployment
+  name: log-forwarder
 spec:
   selector:
-    rack: rack1
+    matchLabels:
+      role: edge
+      os: linux
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
   template:
-    command: echo "apply firmware"
+    metadata:
+      labels:
+        app: log-forwarder
+        role: edge
+    spec:
+      artifact:
+        type: oci
+        url: ghcr.io/example/log-forwarder:1.2.3
+      execution:
+        backend: systemd
+        command:
+        - /usr/local/bin/log-forwarder
+        args:
+        - --config=/etc/log-forwarder.yaml
+      restartPolicy: Always
+      healthCheck:
+        exec:
+          command:
+          - /usr/local/bin/log-forwarder
+          - healthcheck
+        periodSeconds: 30
+        timeoutSeconds: 5
+        successThreshold: 1
+        failureThreshold: 3

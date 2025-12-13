@@ -15,11 +15,23 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.phase
-      name: Phase
+    - jsonPath: .spec.deviceRef.name
+      name: DEVICE
       type: string
+    - jsonPath: .spec.deviceRef.kind
+      name: KIND
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .status.artifactVersion
+      name: VERSION
+      type: string
+    - jsonPath: .status.restartCount
+      name: RESTARTS
+      type: integer
     - jsonPath: .metadata.creationTimestamp
-      name: Age
+      name: AGE
       type: date
     name: v1alpha1
     schema:
@@ -46,15 +58,170 @@ spec:
           spec:
             description: DeviceProcessSpec defines the desired state of DeviceProcess.
             properties:
-              command:
-                description: Command is an opaque command or script reference to execute
-                  on the device.
+              artifact:
+                description: Artifact describes the artifact to fetch and run.
+                properties:
+                  checksumSHA256:
+                    description: ChecksumSHA256 is an optional SHA256 checksum for
+                      integrity verification.
+                    pattern: ^[A-Fa-f0-9]{64}$
+                    type: string
+                  type:
+                    description: Type of artifact reference (oci, http, file).
+                    enum:
+                    - oci
+                    - http
+                    - file
+                    type: string
+                  url:
+                    description: URL locates the artifact (registry reference, http(s)
+                      URL, or file path).
+                    minLength: 1
+                    type: string
+                required:
+                - type
+                - url
+                type: object
+              deviceRef:
+                description: DeviceRef points to the device where this process should
+                  run.
+                properties:
+                  kind:
+                    description: Kind is the device kind (Server, NetworkSwitch, SOC,
+                      BMC).
+                    enum:
+                    - Server
+                    - NetworkSwitch
+                    - SOC
+                    - BMC
+                    type: string
+                  name:
+                    description: Name of the device resource.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the device resource. Omit when using
+                      the same namespace.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              execution:
+                description: Execution describes how to execute the artifact.
+                properties:
+                  args:
+                    description: Args are appended to the command.
+                    items:
+                      type: string
+                    type: array
+                  backend:
+                    description: Backend is the execution mechanism (systemd, initd,
+                      container).
+                    enum:
+                    - systemd
+                    - initd
+                    - container
+                    type: string
+                  command:
+                    description: Command is the executable and required arguments.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  env:
+                    description: Env sets environment variables for the process.
+                    items:
+                      description: DeviceProcessEnvVar is a simple name/value environment
+                        variable.
+                      properties:
+                        name:
+                          description: Name of the variable.
+                          minLength: 1
+                          type: string
+                        value:
+                          description: Value assigned to the variable.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  user:
+                    description: User is the user to run the process as.
+                    type: string
+                  workingDir:
+                    description: WorkingDir sets the working directory for the process.
+                    type: string
+                required:
+                - backend
+                - command
+                type: object
+              healthCheck:
+                description: HealthCheck configures optional periodic health probes.
+                properties:
+                  exec:
+                    description: Exec is the exec action used for health checking.
+                    properties:
+                      command:
+                        description: Command to run for the health check.
+                        items:
+                          type: string
+                        minItems: 1
+                        type: array
+                    required:
+                    - command
+                    type: object
+                  failureThreshold:
+                    default: 3
+                    description: FailureThreshold is the number of consecutive failures
+                      to treat the process as unhealthy.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  periodSeconds:
+                    default: 30
+                    description: PeriodSeconds is the time between probes.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  successThreshold:
+                    default: 1
+                    description: SuccessThreshold is the minimum consecutive successes
+                      for the probe to be considered successful.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 5
+                    description: TimeoutSeconds is the probe timeout.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - exec
+                type: object
+              restartPolicy:
+                default: Always
+                description: RestartPolicy controls restart behavior.
+                enum:
+                - Always
+                - OnFailure
+                - Never
                 type: string
+            required:
+            - artifact
+            - deviceRef
+            - execution
             type: object
           status:
             description: DeviceProcessStatus defines the observed state of DeviceProcess.
             properties:
+              artifactVersion:
+                description: ArtifactVersion is the resolved artifact version (tag
+                  or digest).
+                type: string
               conditions:
+                description: Conditions capture granular state transitions.
                 items:
                   description: "Condition contains details for one aspect of the current
                     state of this API Resource.\n---\nThis struct is intended for
@@ -123,13 +290,33 @@ spec:
                   - type
                   type: object
                 type: array
-              finishedAt:
+              lastTerminationReason:
+                description: LastTerminationReason describes why the process last
+                  exited.
+                type: string
+              lastTransitionTime:
+                description: LastTransitionTime is when the phase last changed.
                 format: date-time
                 type: string
               phase:
-                description: DeviceProcessPhase represents lifecycle phase.
+                description: Phase is a high-level summary of process state.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Unknown
                 type: string
-              startedAt:
+              pid:
+                description: PID is the process identifier on the target device.
+                format: int64
+                type: integer
+              restartCount:
+                description: RestartCount is the number of times the process has restarted.
+                format: int32
+                type: integer
+              startTime:
+                description: StartTime is when the process started.
                 format: date-time
                 type: string
             type: object
