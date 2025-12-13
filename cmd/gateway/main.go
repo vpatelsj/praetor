@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/apollo/praetor/pkg/version"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -50,6 +52,21 @@ func main() {
 	})
 	if err != nil {
 		logger.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &apiv1alpha1.DeviceProcess{}, "spec.deviceRef.name", func(obj client.Object) []string {
+		dp, ok := obj.(*apiv1alpha1.DeviceProcess)
+		if !ok {
+			return nil
+		}
+		if dp.Spec.DeviceRef.Name == "" {
+			return nil
+		}
+		return []string{dp.Spec.DeviceRef.Name}
+	}); err != nil {
+		logger.Error(err, "unable to set deviceRef.name index")
 		os.Exit(1)
 	}
 

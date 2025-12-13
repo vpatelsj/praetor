@@ -6,9 +6,12 @@ services:
     # If you prefer the local binary, you can use build: ../ with a Dockerfile.
     environment:
       - APOLLO_GATEWAY_TOKEN=devtoken
+      - KUBECONFIG=/kubeconfig
     ports:
       - "8080:8080"
     command: ["/apollo-deviceprocess-gateway", "--addr=:8080", "--default-heartbeat-seconds=15", "--stale-multiplier=3"]
+    volumes:
+      - ${HOME}/.kube/config:/kubeconfig:ro
 
   agent-tor1-01:
     image: ghcr.io/apollo/device-agent:dev

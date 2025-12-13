@@ -143,6 +143,9 @@ func (a *agent) fetchDesired(ctx context.Context) (*gateway.DesiredResponse, boo
 	defer resp.Body.Close()
 
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
+	if etag == "" {
+		etag = a.lastETag
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:

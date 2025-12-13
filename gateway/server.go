@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,9 @@ const (
 	defaultHeartbeatSeconds = 15
 	desiredETagHeader       = "ETag"
 	deviceTokenHeader       = "X-Device-Token"
+	maxReportBodyBytes      = 4 << 20
+	connectedReason         = "AgentConnected"
+	connectedMessage        = "device reported"
 )
 
 // DesiredItem describes a desired DeviceProcess instance for a device.
@@ -83,6 +87,7 @@ type Gateway struct {
 
 	mu             sync.RWMutex
 	lastSeen       map[string]time.Time
+	lastReport     map[string]time.Time
 	heartbeatHints map[string]int
 
 	server *http.Server
@@ -105,6 +110,7 @@ func New(c client.Client, recorder recordEmitter, addr, token string, defaultInt
 		defaultInterval: defaultInterval,
 		staleMultiplier: staleMultiplier,
 		lastSeen:        make(map[string]time.Time),
+		lastReport:      make(map[string]time.Time),
 		heartbeatHints:  make(map[string]int),
 	}
 }
@@ -132,17 +138,28 @@ func (g *Gateway) Start(ctx context.Context) error {
 		if !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
-		close(errCh)
 	}()
 
-	<-ctx.Done()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = g.server.Shutdown(shutdownCtx)
 
-	if err := <-errCh; err != nil {
-		return err
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return err
+		}
+	default:
 	}
+
 	return nil
 }
 
@@ -201,7 +218,8 @@ func (g *Gateway) handleDesired(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
-	g.recordHeartbeat(deviceName, desired.HeartbeatIntervalSeconds)
+	g.recordDesiredHeartbeatIfEligible(deviceName)
+	g.recordDesiredHeartbeatIfEligible(deviceName)
 
 	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -216,6 +234,7 @@ func (g *Gateway) handleDesired(ctx context.Context, w http.ResponseWriter, r *h
 }
 
 func (g *Gateway) handleReport(ctx context.Context, w http.ResponseWriter, r *http.Request, deviceName string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxReportBodyBytes)
 	defer r.Body.Close()
 	var req ReportRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -223,11 +242,35 @@ func (g *Gateway) handleReport(ctx context.Context, w http.ResponseWriter, r *ht
 		return
 	}
 
+	var reportedAt *time.Time
+	if req.Timestamp != "" {
+		parsed, err := time.Parse(time.RFC3339, req.Timestamp)
+		if err != nil {
+			g.respondErr(ctx, w, http.StatusBadRequest, "invalid timestamp")
+			return
+		}
+		reportedAt = &parsed
+	}
+	if reportedAt == nil {
+		now := time.Now().UTC()
+		reportedAt = &now
+	}
+
 	g.recordHeartbeat(deviceName, 0)
+	g.recordReport(deviceName)
+	if err := g.markDeviceConnected(ctx, deviceName); err != nil {
+		g.log.Error(err, "mark device connected", "device", deviceName)
+		g.respondErr(ctx, w, http.StatusInternalServerError, "failed to mark device connected")
+		return
+	}
 
 	for i := range req.Observations {
 		obs := req.Observations[i]
-		if err := g.updateStatusForObservation(ctx, deviceName, obs); err != nil {
+		if err := g.updateStatusForObservation(ctx, deviceName, obs, reportedAt); err != nil {
+			if apierrors.IsBadRequest(err) {
+				g.respondErr(ctx, w, http.StatusBadRequest, err.Error())
+				return
+			}
 			if apierrors.IsNotFound(err) {
 				g.log.V(1).Info("deviceprocess not found for observation", "device", deviceName, "name", obs.Name, "namespace", obs.Namespace)
 				continue
@@ -305,7 +348,7 @@ func (g *Gateway) computeDesired(ctx context.Context, deviceName string) (*Desir
 
 func (g *Gateway) listDeviceProcesses(ctx context.Context, deviceName string) ([]apiv1alpha1.DeviceProcess, error) {
 	var list apiv1alpha1.DeviceProcessList
-	if err := g.client.List(ctx, &list); err != nil {
+	if err := g.client.List(ctx, &list, client.MatchingFields{"spec.deviceRef.name": deviceName}); err != nil {
 		return nil, err
 	}
 
@@ -319,11 +362,15 @@ func (g *Gateway) listDeviceProcesses(ctx context.Context, deviceName string) ([
 	return processes, nil
 }
 
-func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName string, obs Observation) error {
+func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName string, obs Observation, reportedAt *time.Time) error {
 	var proc apiv1alpha1.DeviceProcess
 	key := types.NamespacedName{Name: obs.Name, Namespace: obs.Namespace}
 	if err := g.client.Get(ctx, key, &proc); err != nil {
 		return err
+	}
+
+	if proc.Spec.DeviceRef.Name != deviceName {
+		return apierrors.NewBadRequest(fmt.Sprintf("device %s not authorized for %s/%s", deviceName, proc.Namespace, proc.Name))
 	}
 
 	before := proc.DeepCopy()
@@ -332,11 +379,15 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 		proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
 	}
 
-	connectedChanged := setAgentConnected(&proc.Status, true, "Heartbeat", fmt.Sprintf("device %s reported", deviceName))
+	connectedChanged := setAgentConnected(&proc.Status, true, connectedReason, connectedMessage)
 	specObservedChanged := false
 	if obs.ObservedSpecHash != "" && proc.Status.ObservedSpecHash != obs.ObservedSpecHash {
 		proc.Status.ObservedSpecHash = obs.ObservedSpecHash
-		conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecObserved, "SpecObserved", fmt.Sprintf("hash=%s", obs.ObservedSpecHash))
+		msg := fmt.Sprintf("hash=%s", obs.ObservedSpecHash)
+		if reportedAt != nil {
+			msg = fmt.Sprintf("%s reportedAt=%s", msg, reportedAt.UTC().Format(time.RFC3339))
+		}
+		conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecObserved, "SpecObserved", msg)
 		specObservedChanged = true
 	}
 
@@ -344,7 +395,7 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 		return nil
 	}
 
-	if err := g.client.Status().Patch(ctx, &proc, client.MergeFrom(before)); err != nil {
+	if err := g.client.Status().Patch(ctx, &proc, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 
@@ -352,7 +403,11 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 		g.recorder.Event(&proc, corev1.EventTypeNormal, "AgentConnected", fmt.Sprintf("device %s connected", deviceName))
 	}
 	if specObservedChanged {
-		g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", fmt.Sprintf("hash %s", obs.ObservedSpecHash))
+		msg := fmt.Sprintf("hash %s", obs.ObservedSpecHash)
+		if reportedAt != nil {
+			msg = fmt.Sprintf("%s at %s", msg, reportedAt.UTC().Format(time.RFC3339))
+		}
+		g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", msg)
 	}
 
 	return nil
@@ -366,15 +421,16 @@ func (g *Gateway) markDeviceConnected(ctx context.Context, deviceName string) er
 	for i := range procs {
 		proc := procs[i]
 		before := proc.DeepCopy()
-		changed := setAgentConnected(&proc.Status, true, "AgentConnected", "agent reported connected")
+		changed := setAgentConnected(&proc.Status, true, connectedReason, connectedMessage)
 		if !changed {
 			continue
 		}
-		if err := g.client.Status().Patch(ctx, &proc, client.MergeFrom(before)); err != nil {
+		if err := g.client.Status().Patch(ctx, &proc, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
 		g.recorder.Event(&proc, corev1.EventTypeNormal, "AgentConnected", "device connected")
 	}
+	g.recordReport(deviceName)
 	return nil
 }
 
@@ -442,12 +498,48 @@ func (g *Gateway) markDeviceDisconnected(ctx context.Context, deviceName string,
 		if proc.Status.Phase == "" {
 			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
 		}
-		if err := g.client.Status().Patch(ctx, &proc, client.MergeFrom(before)); err != nil {
+		if err := g.client.Status().Patch(ctx, &proc, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
 		g.recorder.Event(&proc, corev1.EventTypeWarning, "AgentDisconnected", fmt.Sprintf("device %s stale", deviceName))
 	}
 	return nil
+}
+
+// recordDesiredHeartbeatIfEligible only counts a desired poll as a heartbeat if we
+// have seen a recent report from the same device. This prevents devices from
+// appearing healthy when they only read desired state without sending reports.
+func (g *Gateway) recordDesiredHeartbeatIfEligible(deviceName string) {
+	now := time.Now()
+	g.mu.RLock()
+	lastReport := g.lastReport[deviceName]
+	heartbeat := g.heartbeatHints[deviceName]
+	g.mu.RUnlock()
+
+	if lastReport.IsZero() {
+		return
+	}
+
+	if heartbeat <= 0 {
+		heartbeat = int(g.defaultInterval.Seconds())
+		if heartbeat <= 0 {
+			heartbeat = defaultHeartbeatSeconds
+		}
+	}
+
+	staleAfter := time.Duration(heartbeat*g.staleMultiplier) * time.Second
+	if now.Sub(lastReport) > staleAfter {
+		return
+	}
+
+	g.recordHeartbeat(deviceName, heartbeat)
+}
+
+// recordReport tracks the time of the last report/connect for a device.
+func (g *Gateway) recordReport(deviceName string) {
+	g.mu.Lock()
+	g.lastReport[deviceName] = time.Now()
+	g.mu.Unlock()
 }
 
 func (g *Gateway) recordHeartbeat(deviceName string, heartbeatHint int) {
@@ -479,8 +571,19 @@ func hashSpec(spec *apiv1alpha1.DeviceProcessSpec) string {
 }
 
 func hashDesired(items []DesiredItem) string {
-	data, _ := json.Marshal(items)
-	sum := sha256.Sum256(data)
+	b := strings.Builder{}
+	for i := range items {
+		item := items[i]
+		b.WriteString(item.Namespace)
+		b.WriteByte('/')
+		b.WriteString(item.Name)
+		b.WriteByte('/')
+		b.WriteString(strconv.FormatInt(item.Generation, 10))
+		b.WriteByte('/')
+		b.WriteString(item.SpecHash)
+		b.WriteByte(';')
+	}
+	sum := sha256.Sum256([]byte(b.String()))
 	return "\"" + hex.EncodeToString(sum[:]) + "\""
 }
 
