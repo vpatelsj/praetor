@@ -21,6 +21,9 @@ spec:
     - jsonPath: .status.currentNumberScheduled
       name: CURRENT
       type: integer
+    - jsonPath: .status.updatedNumberScheduled
+      name: UPDATED
+      type: integer
     - jsonPath: .status.numberReady
       name: READY
       type: integer
@@ -110,6 +113,12 @@ spec:
                   metadata:
                     description: Metadata provides labels to carry forward.
                     properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Annotations are forwarded to DeviceProcess instances
+                          created by this deployment.
+                        type: object
                       labels:
                         additionalProperties:
                           type: string
@@ -271,6 +280,9 @@ spec:
                           of unavailable targets during the update.
                         x-kubernetes-int-or-string: true
                     type: object
+                    x-kubernetes-validations:
+                    - message: rollingUpdate must be set when type is RollingUpdate
+                      rule: self.type != 'RollingUpdate' || has(self.rollingUpdate)
                   type:
                     default: RollingUpdate
                     description: Type is the strategy type.
@@ -388,6 +400,8 @@ spec:
                 format: int32
                 type: integer
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

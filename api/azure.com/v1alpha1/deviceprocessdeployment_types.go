@@ -30,6 +30,7 @@ type DeviceProcessDeploymentStrategy struct {
 	// +kubebuilder:default=RollingUpdate
 	Type DeviceProcessDeploymentStrategyType `json:"type,omitempty"`
 	// RollingUpdate holds settings for RollingUpdate strategy.
+	// +kubebuilder:validation:XValidation:rule="self.type != 'RollingUpdate' || has(self.rollingUpdate)",message="rollingUpdate must be set when type is RollingUpdate"
 	RollingUpdate *DeviceProcessRollingUpdate `json:"rollingUpdate,omitempty"`
 }
 
@@ -37,6 +38,8 @@ type DeviceProcessDeploymentStrategy struct {
 type DeviceProcessTemplateMetadata struct {
 	// Labels are applied to DeviceProcess instances created by this deployment.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Annotations are forwarded to DeviceProcess instances created by this deployment.
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // DeviceProcessTemplateSpec matches DeviceProcessSpec without deviceRef.
@@ -95,6 +98,7 @@ type DeviceProcessDeploymentStatus struct {
 //+kubebuilder:resource:scope=Namespaced
 //+kubebuilder:printcolumn:name="DESIRED",type=integer,JSONPath=`.status.desiredNumberScheduled`
 //+kubebuilder:printcolumn:name="CURRENT",type=integer,JSONPath=`.status.currentNumberScheduled`
+//+kubebuilder:printcolumn:name="UPDATED",type=integer,JSONPath=`.status.updatedNumberScheduled`
 //+kubebuilder:printcolumn:name="READY",type=integer,JSONPath=`.status.numberReady`
 //+kubebuilder:printcolumn:name="AVAILABLE",type=integer,JSONPath=`.status.numberAvailable`
 //+kubebuilder:printcolumn:name="UNAVAILABLE",type=integer,JSONPath=`.status.numberUnavailable`
@@ -105,7 +109,7 @@ type DeviceProcessDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DeviceProcessDeploymentSpec   `json:"spec,omitempty"`
+	Spec   DeviceProcessDeploymentSpec   `json:"spec"`
 	Status DeviceProcessDeploymentStatus `json:"status,omitempty"`
 }
 

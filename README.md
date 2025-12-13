@@ -1,6 +1,6 @@
-# Apollo DeviceProcess (Step 0)
+# Apollo DeviceProcess (Step 1)
 
-Foundational scaffolding for the Apollo DeviceProcess controller and agent.
+API-first CRDs for DeviceProcess and DeviceProcessDeployment (no controller behavior yet).
 
 ## Dev loop
 

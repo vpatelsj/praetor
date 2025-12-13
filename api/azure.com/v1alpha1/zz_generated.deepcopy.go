@@ -337,11 +337,6 @@ func (in *DeviceProcessStatus) DeepCopyInto(out *DeviceProcessStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.PID != nil {
-		in, out := &in.PID, &out.PID
-		*out = new(int64)
-		**out = **in
-	}
 	if in.StartTime != nil {
 		in, out := &in.StartTime, &out.StartTime
 		*out = (*in).DeepCopy()
@@ -349,11 +344,6 @@ func (in *DeviceProcessStatus) DeepCopyInto(out *DeviceProcessStatus) {
 	if in.LastTransitionTime != nil {
 		in, out := &in.LastTransitionTime, &out.LastTransitionTime
 		*out = (*in).DeepCopy()
-	}
-	if in.RestartCount != nil {
-		in, out := &in.RestartCount, &out.RestartCount
-		*out = new(int32)
-		**out = **in
 	}
 }
 
@@ -389,6 +379,13 @@ func (in *DeviceProcessTemplateMetadata) DeepCopyInto(out *DeviceProcessTemplate
 	*out = *in
 	if in.Labels != nil {
 		in, out := &in.Labels, &out.Labels
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.Annotations != nil {
+		in, out := &in.Annotations, &out.Annotations
 		*out = make(map[string]string, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val

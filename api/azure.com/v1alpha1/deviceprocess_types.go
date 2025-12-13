@@ -162,13 +162,13 @@ type DeviceProcessStatus struct {
 	// ArtifactVersion is the resolved artifact version (tag or digest).
 	ArtifactVersion string `json:"artifactVersion,omitempty"`
 	// PID is the process identifier on the target device.
-	PID *int64 `json:"pid,omitempty"`
+	PID int64 `json:"pid,omitempty"`
 	// StartTime is when the process started.
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 	// LastTransitionTime is when the phase last changed.
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 	// RestartCount is the number of times the process has restarted.
-	RestartCount *int32 `json:"restartCount,omitempty"`
+	RestartCount int32 `json:"restartCount,omitempty"`
 	// LastTerminationReason describes why the process last exited.
 	LastTerminationReason string `json:"lastTerminationReason,omitempty"`
 }
@@ -188,7 +188,7 @@ type DeviceProcess struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DeviceProcessSpec   `json:"spec,omitempty"`
+	Spec   DeviceProcessSpec   `json:"spec"`
 	Status DeviceProcessStatus `json:"status,omitempty"`
 }
 
