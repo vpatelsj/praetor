@@ -280,9 +280,6 @@ spec:
                           of unavailable targets during the update.
                         x-kubernetes-int-or-string: true
                     type: object
-                    x-kubernetes-validations:
-                    - message: rollingUpdate must be set when type is RollingUpdate
-                      rule: self.type != 'RollingUpdate' || has(self.rollingUpdate)
                   type:
                     default: RollingUpdate
                     description: Type is the strategy type.
@@ -291,6 +288,9 @@ spec:
                     - Recreate
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: rollingUpdate must be set when type is RollingUpdate
+                  rule: self.type != 'RollingUpdate' || has(self.rollingUpdate)
             required:
             - selector
             - template

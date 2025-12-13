@@ -25,12 +25,12 @@ type DeviceProcessRollingUpdate struct {
 }
 
 // DeviceProcessDeploymentStrategy describes the deployment strategy.
+// +kubebuilder:validation:XValidation:rule="self.type != 'RollingUpdate' || has(self.rollingUpdate)",message="rollingUpdate must be set when type is RollingUpdate"
 type DeviceProcessDeploymentStrategy struct {
 	// Type is the strategy type.
 	// +kubebuilder:default=RollingUpdate
 	Type DeviceProcessDeploymentStrategyType `json:"type,omitempty"`
 	// RollingUpdate holds settings for RollingUpdate strategy.
-	// +kubebuilder:validation:XValidation:rule="self.type != 'RollingUpdate' || has(self.rollingUpdate)",message="rollingUpdate must be set when type is RollingUpdate"
 	RollingUpdate *DeviceProcessRollingUpdate `json:"rollingUpdate,omitempty"`
 }
 
