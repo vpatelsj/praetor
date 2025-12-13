@@ -3,6 +3,7 @@ package reconcilers
 import (
 	"context"
 	"testing"
+	"strings"
 
 	apiv1alpha1 "github.com/apollo/praetor/api/azure.com/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -10,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -109,6 +111,80 @@ func TestReconcileDeletesStaleDeviceProcesses(t *testing.T) {
 
 	if processes.Items[0].Spec.DeviceRef.Name != "leaf-a" {
 		t.Fatalf("expected surviving process for leaf-a, got %s", processes.Items[0].Spec.DeviceRef.Name)
+	}
+}
+
+func TestDeviceProcessNameHashIncludesDeployment(t *testing.T) {
+	deviceName := strings.Repeat("a", 240)
+
+	nameA := deviceProcessName("deployment-a", deviceName)
+	nameB := deviceProcessName("deployment-b", deviceName)
+
+	if nameA == nameB {
+		t.Fatalf("expected hashed names to differ across deployments, got %s", nameA)
+	}
+	if len(nameA) > validation.DNS1123SubdomainMaxLength || len(nameB) > validation.DNS1123SubdomainMaxLength {
+		t.Fatalf("hashed names exceed DNS subdomain length")
+	}
+}
+
+func TestBuildDesiredDeviceProcessSkipsInvalidDeviceLabels(t *testing.T) {
+	scheme := testScheme(t)
+	deployment := sampleDeployment("dpd", map[string]string{"role": "leaf"})
+	badValue := strings.Repeat("r", 70)
+	device := networkSwitch("leaf-a", map[string]string{"rack": badValue})
+
+	proc := buildDesiredDeviceProcess(context.Background(), deployment, device, "dpd-leaf-a")
+	if _, ok := proc.Labels["rack"]; ok {
+		t.Fatalf("expected invalid device label to be skipped")
+	}
+	if proc.Labels[deviceProcessDeploymentUIDKey] != string(deployment.UID) {
+		t.Fatalf("missing deployment UID label on DeviceProcess")
+	}
+	_ = scheme // silence unused warning for consistency with other tests when scheme is extended
+}
+
+func TestUpsertWithoutSSAUpdatesExistingWithoutDroppingMetadata(t *testing.T) {
+	scheme := testScheme(t)
+	existing := &apiv1alpha1.DeviceProcess{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dpd-device",
+			Namespace: "default",
+			Labels:    map[string]string{"agent": "keep"},
+			Annotations: map[string]string{"agent": "keep"},
+		},
+		Spec: apiv1alpha1.DeviceProcessSpec{},
+	}
+
+	desired := existing.DeepCopy()
+	desired.Labels = map[string]string{
+		"controller": "set",
+	}
+	desired.Annotations = map[string]string{"controller": "set"}
+
+	r := &DeviceProcessDeploymentReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build(),
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	if _, err := r.upsertWithoutSSA(context.Background(), desired, false); err != nil {
+		t.Fatalf("upsertWithoutSSA returned error: %v", err)
+	}
+
+	var updated apiv1alpha1.DeviceProcess
+	if err := r.Get(context.Background(), types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated process: %v", err)
+	}
+
+	if updated.Labels["agent"] != "keep" {
+		t.Fatalf("agent label was dropped during update")
+	}
+	if updated.Annotations["agent"] != "keep" {
+		t.Fatalf("agent annotation was dropped during update")
+	}
+	if updated.Labels["controller"] != "set" || updated.Annotations["controller"] != "set" {
+		t.Fatalf("controller metadata not applied")
 	}
 }
 

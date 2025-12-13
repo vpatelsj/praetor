@@ -4,30 +4,6 @@ metadata:
   name: apollo-deviceprocess-manager-role
 rules:
 - apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - events
-  - secrets
-  verbs:
-  - create
-  - get
-  - list
-  - watch
-  - update
-  - patch
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - get
-  - list
-  - watch
-  - update
-  - patch
-- apiGroups:
   - azure.com
   resources:
   - deviceprocesses

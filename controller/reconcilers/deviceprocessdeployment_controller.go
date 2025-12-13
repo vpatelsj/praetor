@@ -29,6 +29,7 @@ import (
 const (
 	fieldManagerName           = "deviceprocess-controller"
 	deviceProcessDeploymentKey = "deviceprocessdeployment"
+	deviceProcessDeploymentUIDKey = "deviceprocessdeployment-uid"
 )
 
 //+kubebuilder:rbac:groups=azure.com,resources=deviceprocessdeployments,verbs=get;list;watch
@@ -58,7 +59,6 @@ func NewDeviceProcessDeploymentReconciler(c client.Client, scheme *runtime.Schem
 func (r *DeviceProcessDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&apiv1alpha1.DeviceProcessDeployment{}).
-		Owns(&apiv1alpha1.DeviceProcess{}).
 		Complete(r)
 }
 
@@ -89,7 +89,7 @@ func (r *DeviceProcessDeploymentReconciler) Reconcile(ctx context.Context, req c
 
 	desiredNames := make(map[string]struct{}, len(devices))
 	createdCount := 0
-	updatedCount := 0
+	ensuredCount := 0
 
 	for i := range devices {
 		device := devices[i]
@@ -102,9 +102,8 @@ func (r *DeviceProcessDeploymentReconciler) Reconcile(ctx context.Context, req c
 		}
 		if created {
 			createdCount++
-		} else {
-			updatedCount++
 		}
+		ensuredCount++
 	}
 
 	deletedCount, err := r.cleanupStale(ctx, &deployment, desiredNames)
@@ -119,7 +118,7 @@ func (r *DeviceProcessDeploymentReconciler) Reconcile(ctx context.Context, req c
 		r.Recorder.Eventf(&deployment, corev1.EventTypeNormal, "DeletedDeviceProcess", "Deleted %d stale DeviceProcess object(s)", deletedCount)
 	}
 
-	logger.Info("reconcile complete", "created", createdCount, "updated", updatedCount, "deleted", deletedCount)
+	logger.Info("reconcile complete", "ensured", ensuredCount, "created", createdCount, "deleted", deletedCount)
 
 	return ctrl.Result{}, nil
 }
@@ -133,7 +132,7 @@ func (r *DeviceProcessDeploymentReconciler) applyDeviceProcess(ctx context.Conte
 	}
 	created := apierrors.IsNotFound(err)
 
-	desired := buildDesiredDeviceProcess(deployment, device, name)
+	desired := buildDesiredDeviceProcess(ctx, deployment, device, name)
 	desired.SetResourceVersion("")
 
 	if err := controllerutil.SetControllerReference(deployment, desired, r.Scheme); err != nil {
@@ -174,8 +173,9 @@ func (r *DeviceProcessDeploymentReconciler) upsertWithoutSSA(ctx context.Context
 				return created, err
 			}
 			created = false
+		} else {
+			return created, nil
 		}
-		return created, nil
 	}
 
 	var current apiv1alpha1.DeviceProcess
@@ -184,8 +184,8 @@ func (r *DeviceProcessDeploymentReconciler) upsertWithoutSSA(ctx context.Context
 		return created, err
 	}
 
-	current.Labels = desired.Labels
-	current.Annotations = desired.Annotations
+	current.Labels = mergeStringMaps(current.Labels, desired.Labels)
+	current.Annotations = mergeStringMaps(current.Annotations, desired.Annotations)
 	current.Spec = desired.Spec
 	current.OwnerReferences = desired.OwnerReferences
 
@@ -212,6 +212,9 @@ func (r *DeviceProcessDeploymentReconciler) cleanupStale(ctx context.Context, de
 		if _, ok := desired[process.Name]; ok {
 			continue
 		}
+		if uidLabel, ok := process.Labels[deviceProcessDeploymentUIDKey]; ok && uidLabel != string(deployment.UID) {
+			continue
+		}
 		if !metav1.IsControlledBy(process, deployment) {
 			continue
 		}
@@ -229,7 +232,7 @@ func (r *DeviceProcessDeploymentReconciler) cleanupStale(ctx context.Context, de
 
 func (r *DeviceProcessDeploymentReconciler) listNetworkSwitches(ctx context.Context, namespace string, selector labels.Selector) ([]unstructured.Unstructured, error) {
 	list := &unstructured.UnstructuredList{}
-	gvk := schema.GroupVersionKind{Group: "azure.com", Version: "v1alpha1", Kind: "NetworkSwitchList"}
+	gvk := schema.GroupVersion{Group: "azure.com", Version: "v1alpha1"}.WithKind("NetworkSwitchList")
 	list.SetGroupVersionKind(gvk)
 
 	opts := []client.ListOption{client.InNamespace(namespace)}
@@ -248,15 +251,16 @@ func (r *DeviceProcessDeploymentReconciler) listNetworkSwitches(ctx context.Cont
 	return list.Items, nil
 }
 
-func buildDesiredDeviceProcess(deployment *apiv1alpha1.DeviceProcessDeployment, device *unstructured.Unstructured, name string) *apiv1alpha1.DeviceProcess {
+func buildDesiredDeviceProcess(ctx context.Context, deployment *apiv1alpha1.DeviceProcessDeployment, device *unstructured.Unstructured, name string) *apiv1alpha1.DeviceProcess {
 	template := deployment.Spec.Template
 	selector := deployment.Spec.Selector
 
 	labels := mergeStringMaps(template.Metadata.Labels, map[string]string{
 		"app":                      deployment.Name,
 		deviceProcessDeploymentKey: deployment.Name,
+		deviceProcessDeploymentUIDKey: string(deployment.UID),
 	})
-	labels = mergeStringMaps(labels, selectedDeviceLabels(device.GetLabels(), &selector))
+	labels = mergeStringMaps(labels, selectedDeviceLabels(ctx, device.GetLabels(), &selector))
 
 	return &apiv1alpha1.DeviceProcess{
 		TypeMeta: metav1.TypeMeta{
@@ -288,7 +292,7 @@ func deviceProcessName(deploymentName, deviceName string) string {
 		return base
 	}
 
-	hash := sha1.Sum([]byte(deviceName))
+	hash := sha1.Sum([]byte(fmt.Sprintf("%s:%s", deploymentName, deviceName)))
 	hashStr := hex.EncodeToString(hash[:])[:10]
 	maxPrefixLen := validation.DNS1123SubdomainMaxLength - len(hashStr) - 1
 	prefix := strings.ToLower(deploymentName)
@@ -319,11 +323,12 @@ func selectorLabelKeys(selector *metav1.LabelSelector) sets.Set[string] {
 	return keys
 }
 
-func selectedDeviceLabels(deviceLabels map[string]string, selector *metav1.LabelSelector) map[string]string {
+func selectedDeviceLabels(ctx context.Context, deviceLabels map[string]string, selector *metav1.LabelSelector) map[string]string {
 	if len(deviceLabels) == 0 {
 		return nil
 	}
 
+	logger := log.FromContext(ctx)
 	keys := selectorLabelKeys(selector)
 	for _, k := range []string{"role", "type", "rack"} {
 		keys.Insert(k)
@@ -331,9 +336,21 @@ func selectedDeviceLabels(deviceLabels map[string]string, selector *metav1.Label
 
 	result := make(map[string]string)
 	for key := range keys {
-		if val, ok := deviceLabels[key]; ok {
-			result[key] = val
+		val, ok := deviceLabels[key]
+		if !ok {
+			continue
 		}
+
+		if errs := validation.IsQualifiedName(key); len(errs) > 0 {
+			logger.V(1).Info("skipping device label with invalid key", "key", key, "errors", strings.Join(errs, "; "))
+			continue
+		}
+		if errs := validation.IsValidLabelValue(val); len(errs) > 0 {
+			logger.V(1).Info("skipping device label with invalid value", "key", key, "errors", strings.Join(errs, "; "))
+			continue
+		}
+
+		result[key] = val
 	}
 
 	return result
