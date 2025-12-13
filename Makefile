@@ -10,7 +10,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
-.PHONY: all fmt vet test generate manifests build tools install deploy kind-image kind-load kind-deploy kind-restart kind-clean clean
+.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build
 
 all: fmt vet test build
 
@@ -43,15 +43,29 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-agent ./agent
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-gateway ./cmd/gateway
 
+# Generate, build, image, and load into kind (controller, gateway, agent images)
+demo-build: tools generate manifests build
+	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
+	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
+	docker build -t apollo/agent:dev -f Dockerfile.agent .
+	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
+	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
+	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
+
 # Apply CRDs
-install: manifests
+crd-install: manifests
 	kubectl apply -f config/crd/bases
 
 # Deploy controller using kustomize and override image/namespace
-deploy: install
+controller-deploy: crd-install
 	kubectl apply -k config/default
 	kubectl -n $(NAMESPACE) set image deploy/apollo-deviceprocess-controller manager=$(IMAGE)
 	kubectl -n $(NAMESPACE) rollout status deploy/apollo-deviceprocess-controller
+
+# Deploy gateway RBAC, deployment, and service
+gateway-deploy:
+	kubectl apply -f config/gateway/rbac.yaml
+	kubectl apply -f config/gateway/deployment.yaml
 
 # Build controller container image (local)
 kind-image:

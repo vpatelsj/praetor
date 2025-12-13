@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
 - bases/azure.com_deviceprocesses.yaml
 - bases/azure.com_deviceprocessdeployments.yaml
+- bases/azure.com_networkswitches.yaml

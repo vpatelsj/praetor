@@ -1,0 +1,23 @@
+apiVersion: azure.com/v1alpha1
+kind: NetworkSwitch
+metadata:
+  name: tor1-01
+  namespace: default
+  labels:
+    site: sfo
+    role: tor
+    rack: r1
+spec:
+  dummy: ok
+---
+apiVersion: azure.com/v1alpha1
+kind: NetworkSwitch
+metadata:
+  name: tor1-02
+  namespace: default
+  labels:
+    site: sfo
+    role: tor
+    rack: r1
+spec:
+  dummy: ok
