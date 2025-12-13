@@ -28,12 +28,14 @@ func main() {
 	var addr string
 	var probeAddr string
 	var authToken string
+	var authTokenSecret string
 	var defaultHeartbeat int
 	var staleMultiplier int
 
 	flag.StringVar(&addr, "addr", ":8080", "address to serve HTTP gateway")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&authToken, "device-token", os.Getenv("APOLLO_GATEWAY_TOKEN"), "Shared device token expected in X-Device-Token header")
+	flag.StringVar(&authTokenSecret, "device-token-secret", os.Getenv("APOLLO_GATEWAY_TOKEN_SECRET"), "Optional HMAC secret for per-device tokens")
 	flag.IntVar(&defaultHeartbeat, "default-heartbeat-seconds", 15, "Default heartbeat interval if none provided by agent")
 	flag.IntVar(&staleMultiplier, "stale-multiplier", 3, "Multiplier applied to heartbeat interval to decide staleness")
 
@@ -75,6 +77,7 @@ func main() {
 		mgr.GetEventRecorderFor("device-gateway"),
 		addr,
 		authToken,
+		authTokenSecret,
 		time.Duration(defaultHeartbeat)*time.Second,
 		staleMultiplier,
 	)

@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -24,24 +29,27 @@ const (
 )
 
 type agent struct {
-	deviceName   string
-	gatewayURL   string
-	deviceToken  string
-	client       *http.Client
-	logger       logr.Logger
-	lastETag     string
-	lastObserved map[string]string
-	heartbeat    time.Duration
+	deviceName        string
+	gatewayURL        string
+	deviceToken       string
+	deviceTokenSecret string
+	client            *http.Client
+	logger            logr.Logger
+	lastETag          string
+	lastObserved      map[string]string
+	heartbeat         time.Duration
 }
 
 func main() {
 	var deviceName string
 	var gatewayURL string
 	var deviceToken string
+	var deviceTokenSecret string
 
 	flag.StringVar(&deviceName, "device-name", getenv("APOLLO_DEVICE_NAME", ""), "Device identifier (env: APOLLO_DEVICE_NAME)")
 	flag.StringVar(&gatewayURL, "gateway-url", getenv("APOLLO_GATEWAY_URL", ""), "Gateway base URL (env: APOLLO_GATEWAY_URL)")
 	flag.StringVar(&deviceToken, "device-token", getenv("APOLLO_DEVICE_TOKEN", ""), "Shared device token (env: APOLLO_DEVICE_TOKEN)")
+	flag.StringVar(&deviceTokenSecret, "device-token-secret", getenv("APOLLO_DEVICE_TOKEN_SECRET", ""), "HMAC secret for device-bound token (env: APOLLO_DEVICE_TOKEN_SECRET)")
 
 	log.Setup()
 	flag.Parse()
@@ -58,13 +66,14 @@ func main() {
 	}
 
 	ag := &agent{
-		deviceName:   deviceName,
-		gatewayURL:   strings.TrimSuffix(gatewayURL, "/"),
-		deviceToken:  strings.TrimSpace(deviceToken),
-		client:       &http.Client{Timeout: 10 * time.Second},
-		logger:       logger,
-		lastObserved: make(map[string]string),
-		heartbeat:    time.Duration(defaultHeartbeatSeconds) * time.Second,
+		deviceName:        deviceName,
+		gatewayURL:        strings.TrimSuffix(gatewayURL, "/"),
+		deviceToken:       strings.TrimSpace(deviceToken),
+		deviceTokenSecret: strings.TrimSpace(deviceTokenSecret),
+		client:            &http.Client{Timeout: 10 * time.Second},
+		logger:            logger,
+		lastObserved:      make(map[string]string),
+		heartbeat:         time.Duration(defaultHeartbeatSeconds) * time.Second,
 	}
 
 	logger.Info("agent starting", "device", deviceName, "gateway", gatewayURL, "version", version.Version, "commit", version.Commit)
@@ -79,48 +88,60 @@ func main() {
 }
 
 func (a *agent) run(ctx context.Context) error {
+	if err := a.pollDesired(ctx); err != nil {
+		return err
+	}
+
+	desiredTicker := time.NewTicker(5 * time.Second)
+	heartbeatTicker := time.NewTicker(a.heartbeat)
+	defer desiredTicker.Stop()
+	defer heartbeatTicker.Stop()
+
 	backoff := 2 * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-		}
-
-		desired, notModified, etag, err := a.fetchDesired(ctx)
-		if err != nil {
-			a.logger.Error(err, "fetch desired failed")
-			time.Sleep(backoff)
-			if backoff < maxBackoff {
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+		case <-desiredTicker.C:
+			if err := a.pollDesired(ctx); err != nil {
+				a.logger.Error(err, "poll desired failed")
+				sleepWithJitter(ctx, backoff)
+				backoff = nextBackoff(backoff)
+				continue
 			}
-			continue
-		}
-		backoff = 2 * time.Second
-		a.lastETag = etag
-
-		if !notModified && desired != nil && desired.HeartbeatIntervalSeconds > 0 {
-			a.heartbeat = time.Duration(desired.HeartbeatIntervalSeconds) * time.Second
-		}
-
-		observations := a.computeObservations(desired, notModified)
-		if err := a.sendReport(ctx, observations); err != nil {
-			a.logger.Error(err, "failed to send report")
-			time.Sleep(backoff)
-			if backoff < maxBackoff {
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+			backoff = 2 * time.Second
+		case <-heartbeatTicker.C:
+			if err := a.sendReport(ctx, nil); err != nil {
+				a.logger.Error(err, "heartbeat report failed")
+				sleepWithJitter(ctx, backoff)
+				backoff = nextBackoff(backoff)
+				continue
 			}
-			continue
+			backoff = 2 * time.Second
 		}
 
-		time.Sleep(a.heartbeat)
+		// Adjust heartbeat ticker if desired interval changed.
+		heartbeatTicker.Reset(a.heartbeat)
 	}
+}
+
+func (a *agent) pollDesired(ctx context.Context) error {
+	desired, notModified, etag, err := a.fetchDesired(ctx)
+	if err != nil {
+		return err
+	}
+	a.lastETag = etag
+
+	if !notModified && desired != nil && desired.HeartbeatIntervalSeconds > 0 {
+		a.heartbeat = time.Duration(desired.HeartbeatIntervalSeconds) * time.Second
+	}
+
+	obs := a.computeObservations(desired, notModified)
+	if len(obs) == 0 {
+		return nil
+	}
+	return a.sendReport(ctx, obs)
 }
 
 func (a *agent) fetchDesired(ctx context.Context) (*gateway.DesiredResponse, bool, string, error) {
@@ -132,8 +153,8 @@ func (a *agent) fetchDesired(ctx context.Context) (*gateway.DesiredResponse, boo
 	if a.lastETag != "" {
 		req.Header.Set("If-None-Match", a.lastETag)
 	}
-	if a.deviceToken != "" {
-		req.Header.Set("X-Device-Token", a.deviceToken)
+	if token := a.computeDeviceToken(); token != "" {
+		req.Header.Set("X-Device-Token", token)
 	}
 
 	resp, err := a.client.Do(req)
@@ -204,8 +225,8 @@ func (a *agent) sendReport(ctx context.Context, observations []gateway.Observati
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if a.deviceToken != "" {
-		req.Header.Set("X-Device-Token", a.deviceToken)
+	if token := a.computeDeviceToken(); token != "" {
+		req.Header.Set("X-Device-Token", token)
 	}
 
 	resp, err := a.client.Do(req)
@@ -227,6 +248,32 @@ func (a *agent) sendReport(ctx context.Context, observations []gateway.Observati
 
 func itemKey(ns, name string) string {
 	return ns + "/" + name
+}
+
+func (a *agent) computeDeviceToken() string {
+	if a.deviceTokenSecret != "" {
+		h := hmac.New(func() hash.Hash { return sha256.New() }, []byte(a.deviceTokenSecret))
+		h.Write([]byte(a.deviceName))
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	return a.deviceToken
+}
+
+func sleepWithJitter(ctx context.Context, base time.Duration) {
+	jitter := time.Duration(rand.Int63n(int64(250 * time.Millisecond)))
+	d := base + jitter
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
+	}
+}
+
+func nextBackoff(current time.Duration) time.Duration {
+	n := current * 2
+	if n > maxBackoff {
+		return maxBackoff
+	}
+	return n
 }
 
 func getenv(key, fallback string) string {

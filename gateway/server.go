@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"net/http"
 	"sort"
 	"strconv"
@@ -24,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -82,6 +83,7 @@ type Gateway struct {
 
 	addr            string
 	authToken       string
+	authSecret      string
 	defaultInterval time.Duration
 	staleMultiplier int
 
@@ -100,13 +102,14 @@ type recordEmitter interface {
 }
 
 // New constructs a Gateway server instance.
-func New(c client.Client, recorder recordEmitter, addr, token string, defaultInterval time.Duration, staleMultiplier int) *Gateway {
+func New(c client.Client, recorder recordEmitter, addr, token, tokenSecret string, defaultInterval time.Duration, staleMultiplier int) *Gateway {
 	return &Gateway{
 		client:          c,
 		recorder:        recorder,
 		log:             ctrl.Log.WithName("gateway"),
 		addr:            addr,
 		authToken:       strings.TrimSpace(token),
+		authSecret:      strings.TrimSpace(tokenSecret),
 		defaultInterval: defaultInterval,
 		staleMultiplier: staleMultiplier,
 		lastSeen:        make(map[string]time.Time),
@@ -204,10 +207,27 @@ func (g *Gateway) handleDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) authorize(r *http.Request, _ string) bool {
+	header := strings.TrimSpace(r.Header.Get(deviceTokenHeader))
+
+	// Preferred: per-device HMAC token when secret is configured.
+	if g.authSecret != "" {
+		device := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), "v1/devices/")
+		if idx := strings.Index(device, "/"); idx >= 0 {
+			device = device[:idx]
+		}
+		if device != "" {
+			expected := computeDeviceToken(g.authSecret, device)
+			if hmac.Equal([]byte(header), []byte(expected)) {
+				return true
+			}
+		}
+	}
+
+	// Fallback: shared token for dev/compat.
 	if g.authToken == "" {
 		return true
 	}
-	return strings.TrimSpace(r.Header.Get(deviceTokenHeader)) == g.authToken
+	return header == g.authToken
 }
 
 func (g *Gateway) handleDesired(ctx context.Context, w http.ResponseWriter, r *http.Request, deviceName string) {
@@ -218,7 +238,6 @@ func (g *Gateway) handleDesired(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
-	g.recordDesiredHeartbeatIfEligible(deviceName)
 	g.recordDesiredHeartbeatIfEligible(deviceName)
 
 	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && match == etag {
@@ -256,12 +275,20 @@ func (g *Gateway) handleReport(ctx context.Context, w http.ResponseWriter, r *ht
 		reportedAt = &now
 	}
 
-	g.recordHeartbeat(deviceName, 0)
+	now := time.Now()
+	prevSeen, hb := g.lastSeenAndHeartbeat(deviceName)
+	staleAfter := time.Duration(hb*g.staleMultiplier) * time.Second
+	isStale := prevSeen.IsZero() || now.Sub(prevSeen) > staleAfter
+
+	g.recordHeartbeat(deviceName, hb)
 	g.recordReport(deviceName)
-	if err := g.markDeviceConnected(ctx, deviceName); err != nil {
-		g.log.Error(err, "mark device connected", "device", deviceName)
-		g.respondErr(ctx, w, http.StatusInternalServerError, "failed to mark device connected")
-		return
+
+	if isStale {
+		if err := g.markDeviceConnected(ctx, deviceName); err != nil {
+			g.log.Error(err, "mark device connected", "device", deviceName)
+			g.respondErr(ctx, w, http.StatusInternalServerError, "failed to mark device connected")
+			return
+		}
 	}
 
 	for i := range req.Observations {
@@ -286,7 +313,9 @@ func (g *Gateway) handleReport(ctx context.Context, w http.ResponseWriter, r *ht
 }
 
 func (g *Gateway) handleConnect(ctx context.Context, w http.ResponseWriter, r *http.Request, deviceName string) {
-	g.recordHeartbeat(deviceName, 0)
+	hb := g.effectiveHeartbeat(deviceName)
+	g.recordHeartbeat(deviceName, hb)
+	g.recordReport(deviceName)
 	if err := g.markDeviceConnected(ctx, deviceName); err != nil {
 		g.log.Error(err, "mark device connected", "device", deviceName)
 		g.respondErr(ctx, w, http.StatusInternalServerError, "failed to mark device connected")
@@ -296,8 +325,8 @@ func (g *Gateway) handleConnect(ctx context.Context, w http.ResponseWriter, r *h
 	_ = json.NewEncoder(w).Encode(ReportResponse{Ack: true})
 }
 
-func (g *Gateway) respondErr(ctx context.Context, w http.ResponseWriter, status int, msg string) {
-	log.FromContext(ctx).V(1).Info("http error", "status", status, "message", msg)
+func (g *Gateway) respondErr(_ context.Context, w http.ResponseWriter, status int, msg string) {
+	g.log.V(1).Info("http error", "status", status, "message", msg)
 	http.Error(w, msg, status)
 }
 
@@ -491,7 +520,7 @@ func (g *Gateway) markDeviceDisconnected(ctx context.Context, deviceName string,
 	for i := range procs {
 		proc := procs[i]
 		before := proc.DeepCopy()
-		changed := setAgentConnected(&proc.Status, false, "AgentDisconnected", fmt.Sprintf("last seen %s ago", age.Round(time.Second)))
+		changed := setAgentConnected(&proc.Status, false, "AgentDisconnected", "device stale (no recent reports)")
 		if !changed {
 			continue
 		}
@@ -520,13 +549,7 @@ func (g *Gateway) recordDesiredHeartbeatIfEligible(deviceName string) {
 		return
 	}
 
-	if heartbeat <= 0 {
-		heartbeat = int(g.defaultInterval.Seconds())
-		if heartbeat <= 0 {
-			heartbeat = defaultHeartbeatSeconds
-		}
-	}
-
+	heartbeat = g.normalizeHeartbeat(heartbeat)
 	staleAfter := time.Duration(heartbeat*g.staleMultiplier) * time.Second
 	if now.Sub(lastReport) > staleAfter {
 		return
@@ -535,11 +558,44 @@ func (g *Gateway) recordDesiredHeartbeatIfEligible(deviceName string) {
 	g.recordHeartbeat(deviceName, heartbeat)
 }
 
+func (g *Gateway) lastSeenAndHeartbeat(deviceName string) (time.Time, int) {
+	g.mu.RLock()
+	last := g.lastSeen[deviceName]
+	hb := g.heartbeatHints[deviceName]
+	g.mu.RUnlock()
+
+	hb = g.normalizeHeartbeat(hb)
+	return last, hb
+}
+
+func (g *Gateway) normalizeHeartbeat(hb int) int {
+	if hb <= 0 {
+		hb = int(g.defaultInterval.Seconds())
+		if hb <= 0 {
+			hb = defaultHeartbeatSeconds
+		}
+	}
+	return hb
+}
+
+func (g *Gateway) effectiveHeartbeat(deviceName string) int {
+	g.mu.RLock()
+	hb := g.heartbeatHints[deviceName]
+	g.mu.RUnlock()
+	return g.normalizeHeartbeat(hb)
+}
+
 // recordReport tracks the time of the last report/connect for a device.
 func (g *Gateway) recordReport(deviceName string) {
 	g.mu.Lock()
 	g.lastReport[deviceName] = time.Now()
 	g.mu.Unlock()
+}
+
+func computeDeviceToken(secret, device string) string {
+	h := hmac.New(func() hash.Hash { return sha256.New() }, []byte(secret))
+	_, _ = h.Write([]byte(device))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (g *Gateway) recordHeartbeat(deviceName string, heartbeatHint int) {
@@ -561,7 +617,7 @@ func setAgentConnected(status *apiv1alpha1.DeviceProcessStatus, connected bool, 
 	conditions.SetCondition(&status.Conditions, metav1.Condition{Type: string(apiv1alpha1.ConditionAgentConnected), Status: desiredStatus, Reason: reason, Message: message})
 	after := conditions.FindCondition(status.Conditions, apiv1alpha1.ConditionAgentConnected)
 
-	return before == nil || after == nil || before.Status != after.Status || before.Message != after.Message
+	return before == nil || after == nil || before.Status != after.Status || before.Reason != after.Reason || before.Message != after.Message
 }
 
 func hashSpec(spec *apiv1alpha1.DeviceProcessSpec) string {
