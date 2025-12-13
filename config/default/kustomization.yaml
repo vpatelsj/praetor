@@ -4,4 +4,3 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
-- ../samples

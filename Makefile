@@ -4,12 +4,13 @@ CONTROLLER_GEN := $(shell go env GOPATH)/bin/controller-gen
 CONTROLLER_GEN_VERSION ?= v0.14.0
 IMAGE ?= apollo-deviceprocess-controller:dev
 KIND_CLUSTER ?= apollo-dev
+NAMESPACE ?= default
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
-.PHONY: all fmt vet test generate manifests build tools kind-image kind-load kind-deploy kind-restart kind-clean
+.PHONY: all fmt vet test generate manifests build tools install deploy kind-image kind-load kind-deploy kind-restart kind-clean clean
 
 all: fmt vet test build
 
@@ -42,6 +43,16 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-agent ./agent
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-gateway ./cmd/gateway
 
+# Apply CRDs
+install: manifests
+	kubectl apply -f config/crd/bases
+
+# Deploy controller using kustomize and override image/namespace
+deploy: install
+	kubectl apply -k config/default
+	kubectl -n $(NAMESPACE) set image deploy/apollo-deviceprocess-controller manager=$(IMAGE)
+	kubectl -n $(NAMESPACE) rollout status deploy/apollo-deviceprocess-controller
+
 # Build controller container image (local)
 kind-image:
 	docker build -f Dockerfile.controller -t $(IMAGE) .
@@ -63,3 +74,7 @@ kind-restart: kind-deploy
 # Delete all deployed resources from the default kustomize overlay
 kind-clean:
 	kubectl delete -k config/default --ignore-not-found
+
+# Remove local build artifacts
+clean:
+	rm -rf bin
