@@ -39,7 +39,7 @@ rm -rf bin/
 ```
 export KIND_CLUSTER=apollo-dev
 kind delete cluster --name $KIND_CLUSTER || true
-make agents-down
+make stop-device-agents
 kind create cluster --name $KIND_CLUSTER --image kindest/node:v1.29.4
 kubectl cluster-info --context kind-$KIND_CLUSTER
 ```
@@ -138,12 +138,12 @@ Run one container per device with systemd PID1. Use the provided make target to 
 
 Start containers (uses Docker bridge IP automatically):
 ```
-make agents-up                # uses AGENT_NAMES=device-01 device-02 and AGENT_GATEWAY=http://<docker-bridge-ip>:18080
+make start-device-agents      # uses AGENT_NAMES=device-01 device-02 and AGENT_GATEWAY=http://<docker-bridge-ip>:18080
 ```
 
 Stop them when done:
 ```
-make agents-down
+make stop-device-agents
 ```
 
 Check inside one container if needed:

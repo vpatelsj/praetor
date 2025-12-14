@@ -20,7 +20,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
-.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build container-build container-demo-build ensure-kind demo-up install-crs start-device-agents monitor agents-up agents-down
+.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build container-build container-demo-build ensure-kind demo-up install-crs start-device-agents monitor stop-device-agents
 
 all: fmt vet test build
 
@@ -81,8 +81,9 @@ container-demo-build: ensure-kind container-build
 ensure-kind:
 	@command -v kind >/dev/null 2>&1 || (echo "kind not found; installing with '$(KIND_INSTALL_CMD)'" && $(KIND_INSTALL_CMD))
 
-# Steps 0-5 from demo.md: clean, recreate kind cluster, build/load images, install CRDs, deploy controller and gateway.
+# Steps 0-2 from demo.md (plus CRD/controller/gateway deploy): clean, stop agents, recreate kind cluster, build/load images, install CRDs, deploy controller and gateway.
 demo-up: ensure-kind clean
+	$(MAKE) stop-device-agents
 	kind delete cluster --name $(KIND_CLUSTER) || true
 	kind create cluster --name $(KIND_CLUSTER) --image $(KIND_IMAGE)
 	kubectl cluster-info --context kind-$(KIND_CLUSTER)
@@ -91,18 +92,12 @@ demo-up: ensure-kind clean
 	$(MAKE) controller-deploy
 	$(MAKE) gateway-deploy
 
-# Steps 6-8: apply demo device inventory and deployment, plus a helper to port-forward the gateway.
-# Steps 6-8 combined: apply demo CRs and start gateway port-forward (blocking).
-install-crs:
+# Steps 3-8 from demo.md: install CRDs, deploy controller/gateway, apply demo inventory and deployment, then port-forward gateway (blocking).
+install-crs: crd-install controller-deploy gateway-deploy
 	kubectl apply -f examples/networkswitches-demo.yaml
 	kubectl apply -f examples/deviceprocessdeployment-demo.yaml
 	@echo "Port-forwarding gateway on 0.0.0.0:$(FORWARD_PORT) -> 8080 (ctrl-c to stop)"
 	kubectl -n $(NAMESPACE) port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 $(FORWARD_PORT):8080
-
-# Step 9: start demo device agents via docker compose (uses APOLLO_GATEWAY_URL env)
-start-device-agents:
-	@echo "Starting demo agents against $(APOLLO_GATEWAY_URL) (ctrl-c to stop)"
-	APOLLO_GATEWAY_URL=$(APOLLO_GATEWAY_URL) docker compose up
 
 # Quick monitor: list key resources
 monitor:
@@ -148,8 +143,8 @@ kind-restart: kind-deploy
 kind-clean:
 	kubectl delete -k config/default --ignore-not-found
 
-# Start systemd-capable agent containers pointing at the host gateway port-forward.
-agents-up:
+# Step 9: start systemd-capable agent containers pointing at the host gateway port-forward.
+start-device-agents:
 	@[ -n "$(DOCKER_BRIDGE_IP)" ] || (echo "docker bridge IP not found; ensure docker is running" && exit 1)
 	@echo "Using agent gateway: $(AGENT_GATEWAY)"
 	for dev in $(AGENT_NAMES); do \
@@ -163,8 +158,8 @@ agents-up:
 		  apollo/agent:dev; \
 	done
 
-# Stop agent containers started by agents-up.
-agents-down:
+# Stop agent containers started by start-device-agents.
+stop-device-agents:
 	for dev in $(AGENT_NAMES); do docker rm -f $$dev 2>/dev/null || true; done
 
 # Remove local build artifacts
