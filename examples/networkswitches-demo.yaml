@@ -1,7 +1,7 @@
 apiVersion: azure.com/v1alpha1
 kind: NetworkSwitch
 metadata:
-  name: tor1-01
+  name: device-01
   namespace: default
   labels:
     site: sfo
@@ -13,11 +13,11 @@ spec:
 apiVersion: azure.com/v1alpha1
 kind: NetworkSwitch
 metadata:
-  name: tor1-02
+  name: device-02
   namespace: default
   labels:
     site: sfo
     role: tor
-    rack: r1
+    rack: r2
 spec:
   dummy: ok

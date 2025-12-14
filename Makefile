@@ -5,12 +5,15 @@ CONTROLLER_GEN_VERSION ?= v0.14.0
 IMAGE ?= apollo-deviceprocess-controller:dev
 KIND_CLUSTER ?= apollo-dev
 NAMESPACE ?= default
+DOCKER_BRIDGE_IP ?= $(shell docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
+AGENT_GATEWAY ?= http://$(DOCKER_BRIDGE_IP):18080
+AGENT_NAMES ?= device-01 device-02
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
-.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build
+.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build agents-up agents-down
 
 all: fmt vet test build
 
@@ -88,6 +91,25 @@ kind-restart: kind-deploy
 # Delete all deployed resources from the default kustomize overlay
 kind-clean:
 	kubectl delete -k config/default --ignore-not-found
+
+# Start systemd-capable agent containers pointing at the host gateway port-forward.
+agents-up:
+	@[ -n "$(DOCKER_BRIDGE_IP)" ] || (echo "docker bridge IP not found; ensure docker is running" && exit 1)
+	@echo "Using agent gateway: $(AGENT_GATEWAY)"
+	for dev in $(AGENT_NAMES); do \
+		docker rm -f $$dev 2>/dev/null || true; \
+		docker run -d --name $$dev --hostname $$dev \
+		  --privileged --cgroupns=host \
+		  --tmpfs /run --tmpfs /run/lock \
+		  -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+		  -e APOLLO_GATEWAY_URL=$(AGENT_GATEWAY) \
+		  -e APOLLO_DEVICE_NAME=$$dev \
+		  apollo/agent:dev; \
+	done
+
+# Stop agent containers started by agents-up.
+agents-down:
+	for dev in $(AGENT_NAMES); do docker rm -f $$dev 2>/dev/null || true; done
 
 # Remove local build artifacts
 clean:

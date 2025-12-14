@@ -18,6 +18,7 @@ rm -rf bin/
 ```
 export KIND_CLUSTER=apollo-dev
 kind delete cluster --name $KIND_CLUSTER || true
+make agents-down
 kind create cluster --name $KIND_CLUSTER --image kindest/node:v1.29.4
 kubectl cluster-info --context kind-$KIND_CLUSTER
 ```
@@ -74,30 +75,18 @@ make gateway-deploy
 
 
 ### 6) Create device inventory objects (NetworkSwitches)
-The controller targets NetworkSwitch; create a single device to match our one WSL-based agent. The CRD is already installed by step 3.
-- **What:** apply a single NetworkSwitch named tor1-01 with the labels the demo deployment expects. (We no longer create tor1-02 because we only run one agent.)
-- **Expectation:** one NetworkSwitch resource exists with site=sfo, role=tor labels.
-- **Why:** DeviceProcessDeployment selector matches this device; controller will fan out one DeviceProcess.
+The controller targets NetworkSwitch; create one per containerized agent you plan to run. The CRD is already installed by step 3.
+- **What:** apply the demo NetworkSwitches (device-01, device-02) with the labels the demo deployment expects. Add more devices by editing `examples/networkswitches-demo.yaml` if you scale higher.
+- **Expectation:** resources exist with site=sfo, role=tor labels.
+- **Why:** DeviceProcessDeployment selector matches these devices; controller will fan out one DeviceProcess per device.
 ```
-kubectl apply -f - <<'EOF'
-apiVersion: azure.com/v1alpha1
-kind: NetworkSwitch
-metadata:
-  name: tor1-01
-  namespace: default
-  labels:
-    site: sfo
-    role: tor
-    rack: r1
-spec:
-  dummy: ok
-EOF
+kubectl apply -f examples/networkswitches-demo.yaml
 ```
 
 ### 7) Prepare demo DeviceProcessDeployment
-- **What:** apply the demo DeviceProcessDeployment in [examples/deviceprocessdeployment-demo.yaml](examples/deviceprocessdeployment-demo.yaml) targeting the single tor1-01 device (selector still matches site=sfo, role=tor, so only tor1-01 exists). The template uses the `systemd` backend (supported by the WSL agent path).
-- **Expectation:** controller creates one DeviceProcess object (firmware-upgrade-tor1-01) after apply.
-- **Why:** shows DaemonSet-like fanout and central desired state, reduced to one device for the WSL agent path.
+- **What:** apply the demo DeviceProcessDeployment in [examples/deviceprocessdeployment-demo.yaml](examples/deviceprocessdeployment-demo.yaml) targeting all devices with site=sfo, role=tor. The template uses the `systemd` backend (supported by the container systemd path and WSL).
+- **Expectation:** controller creates one DeviceProcess per device (e.g., firmware-upgrade-device-01, firmware-upgrade-device-02).
+- **Why:** shows DaemonSet-like fanout and central desired state.
 ```
 kubectl apply -f examples/deviceprocessdeployment-demo.yaml
 sleep 5   # allow controller to fan out
@@ -108,89 +97,51 @@ This step only proves desired-state plumbing; the container fields are not execu
 
 
 ### 8) Make gateway reachable to local agents (port-forward)
-Use two terminals so the blocking port-forward does not hide the next commands. Bind to all interfaces so the WSL host (and anything else) can hit the forward. **Use one port everywhere; default to 18080.**
-- **What:** expose the in-cluster gateway service to the host for local WSL agents.
+Use two terminals so the blocking port-forward does not hide the next commands. Bind to all interfaces so containers/WSL can hit the forward. **Use one port everywhere; default to 18080.**
+- **What:** expose the in-cluster gateway service to the host for local containerized or WSL agents.
 - **Expectation:** Terminal A runs the forward; Terminal B sets APOLLO_GATEWAY_URL for later steps.
 - **Why:** agents run outside the cluster and need a stable URL to the gateway.
 
-Terminal A (blocking):
 ```
 FORWARD_PORT=18080
 kubectl -n default port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 ${FORWARD_PORT}:8080
 ```
 
-Terminal B (reuse for the WSL agent later):
-```
-export FORWARD_PORT=18080
-export APOLLO_GATEWAY_URL=http://localhost:${FORWARD_PORT}   # WSL agent will call back to this
 
-# quick sanity check from host (should return 200 or 304 once DeviceProcess exists)
-curl -i http://localhost:${FORWARD_PORT}/v1/devices/tor1-01/desired || true
-```
-
-### Optional: run containerized agents via docker compose (no Kubernetes access)
-Skip this if you are following the WSL systemd path. In the same shell where `APOLLO_GATEWAY_URL` is exported from step 8, use the repo compose file so it picks up the correct port. If your gateway expects auth, add `APOLLO_DEVICE_TOKEN` (or remove it if running in insecure mode).
-- **What:** start agent containers that poll the gateway and report status; no kube creds.
-- **Expectation:** agents connect over HTTP to the forwarded gateway URL and fetch desired state. For the single-agent path, you can comment out the second container in the compose file.
-- **Why:** demonstrates edge connectivity and that agents never contact the apiserver directly.
-```
-docker compose up         # optional fallback; WSL path runs the binary directly
-```
+### 9) Run systemd-capable agents in containers (WSL-friendly)
+Run one container per device with systemd PID1. Use the provided make target to start them with the Docker bridge gateway IP (works on WSL when host.docker.internal does not resolve).
+- **What:** start two sample agents (device-01, device-02); scale by editing `AGENT_NAMES` in the Makefile or overriding on the command line.
+- **Expectation:** each container hostname/device name matches a NetworkSwitch from step 6 and becomes Ready.
+- **Why:** demonstrates multi-device fanout without extra VMs.
 
 
-### 9) Run the agent locally on WSL (systemd-enabled, single device)
-WSL now ships with systemd, so we can run the agent directly without QEMU. We only run one agent (tor1-01) to match the single NetworkSwitch created in step 6.
-- **What:** run the Linux binary on your WSL distro as root so it can manage systemd units.
-- **Expectation:** the agent connects to `APOLLO_GATEWAY_URL` (localhost:18080 from step 8), fetches desired state for tor1-01, and manages the systemd unit.
-- **Why:** simpler than QEMU and avoids duplicate agents.
-
-Prep (still in WSL; keep the port-forward from step 8 running):
+Start containers (uses Docker bridge IP automatically):
 ```
-make demo-build   # ensures ./bin/apollo-deviceprocess-agent exists
+make agents-up                # uses AGENT_NAMES=device-01 device-02 and AGENT_GATEWAY=http://<docker-bridge-ip>:18080
 ```
 
-Run the agent (WSL shell):
+Stop them when done:
 ```
-sudo env \
-  APOLLO_DEVICE_NAME=tor1-01 \
-  APOLLO_GATEWAY_URL=${APOLLO_GATEWAY_URL:-http://localhost:18080} \
-  ./bin/apollo-deviceprocess-agent
+make agents-down
 ```
 
-If you want it as a service, create a simple unit:
+Check inside one container if needed:
 ```
-cat | sudo tee /etc/systemd/system/apollo-agent.service >/dev/null <<'EOF'
-[Unit]
-Description=Apollo DeviceProcess Agent (WSL)
-After=network-online.target
-
-[Service]
-ExecStart=/home/$USER/dev/praetor/bin/apollo-deviceprocess-agent
-Restart=always
-Environment=APOLLO_GATEWAY_URL=${APOLLO_GATEWAY_URL:-http://localhost:18080}
-Environment=APOLLO_DEVICE_NAME=tor1-01
-#Environment=APOLLO_DEVICE_TOKEN=...
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now apollo-agent
-sudo systemctl status apollo-agent --no-pager
+docker exec -it device-01 bash -lc "systemctl status apollo-agent --no-pager"
 ```
+
 
 ### 10) Verify status and events
 - **What:** check that DeviceProcess objects reflect agent connection, observed spec, and now the runtime info (pid/startTime) coming from the systemd backend.
 - **Expectation:** conditions show AgentConnected=True, SpecObserved=True, ProcessStarted=True; observedSpecHash is set; `status.pid` and `status.startTime` are populated when systemd is available; events exist.
 - **Why:** proves the gateway writes status/events back based on agent reports and the systemd runtime data.
 
-We installed one networkswitch (tor1-01).  
-We installed a deviceprocessdeployment firmware-upgrade that targets that switch, so the controller should have created one deviceprocess (firmware-upgrade-tor1-01).
+We installed two networkswitches (device-01, device-02).
+We installed a deviceprocessdeployment firmware-upgrade that targets those switches, so the controller should have created matching deviceprocesses (firmware-upgrade-device-01, firmware-upgrade-device-02).
 
-We then started the agent inside WSL with systemd enabled. It talks to the gateway we port-forwarded in step 8. It polls the gateway, gets its desired state, and reports status back.
+We then started the agents inside containers with systemd PID1. They talk to the gateway we port-forwarded in step 8. They poll the gateway, get their desired state, and report status back.
 
-The deviceprocess object should now show that the agent is connected and has observed the spec. It should also have events logged.
+The deviceprocess objects should now show that the agents are connected and have observed the spec. They should also have events logged.
 
 ```
 kubectl get deviceprocessdeployment
@@ -199,12 +150,11 @@ kubectl get networkswitch
 kubectl get pods
 
 # check pid/startTime fields on one of the deviceprocesses
-kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.pid}{"\\n"}'
-kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.startTime}{"\\n"}'
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.pid}{"\\n"}'
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.startTime}{"\\n"}'
 
 ```
 
-# Conclusion
 
 # Optional: run the agent directly on another systemd host
 
@@ -213,23 +163,12 @@ kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.startTi
 
 ```
 # run the agent locally as root so it can manage systemd; reuse the forwarded gateway port
-sudo env APOLLO_DEVICE_NAME=tor1-01 APOLLO_GATEWAY_URL=${APOLLO_GATEWAY_URL:-http://localhost:18080} \
+sudo env APOLLO_DEVICE_NAME=device-01 APOLLO_GATEWAY_URL=${APOLLO_GATEWAY_URL:-http://localhost:18080} \
   ./bin/apollo-deviceprocess-agent
 
-# in another terminal, inspect the systemd artifacts written by the agent
-sudo systemctl status "apollo-default-firmware-upgrade-tor1-01.service"
-sudo systemctl cat "apollo-default-firmware-upgrade-tor1-01.service"
-sudo cat /etc/apollo/env/apollo-default-firmware-upgrade-tor1-01.env
-
 # confirm runtime data flows back into status
-kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.pid}{"\\n"}'
-kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.startTime}{"\\n"}'
-
-# optional cleanup for this device
-sudo systemctl stop "apollo-default-firmware-upgrade-tor1-01.service" || true
-sudo systemctl disable "apollo-default-firmware-upgrade-tor1-01.service" || true
-sudo rm -f /etc/systemd/system/apollo-default-firmware-upgrade-tor1-01.service /etc/apollo/env/apollo-default-firmware-upgrade-tor1-01.env
-sudo systemctl daemon-reload
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.pid}{"\\n"}'
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.startTime}{"\\n"}'
 ```
 
 
@@ -244,20 +183,20 @@ Use a new terminal from this step onward; the log follow blocks.
 
 ```
 # Show ETag behavior (non-blocking)
-curl -i http://localhost:${FORWARD_PORT:-18080}/v1/devices/tor1-01/desired | tee /tmp/desired.txt
+curl -i http://localhost:${FORWARD_PORT:-18080}/v1/devices/device-01/desired | tee /tmp/desired.txt
 etag=$(grep -i ETag /tmp/desired.txt | awk '{print $2}')
-curl -i -H "If-None-Match: ${etag}" http://localhost:${FORWARD_PORT:-18080}/v1/devices/tor1-01/desired
+curl -i -H "If-None-Match: ${etag}" http://localhost:${FORWARD_PORT:-18080}/v1/devices/device-01/desired
 
 # Follow gateway events (blocking; do in this terminal)
 kubectl -n default logs -f deploy/apollo-deviceprocess-gateway
 ```
 
-In another terminal (WSL), stop the agent service to simulate staleness:
+In another terminal, stop one container agent to simulate staleness:
 ```
-sudo systemctl stop apollo-agent
+docker stop device-02
 sleep 45   # wait past stale timeout (default ~30s) so AgentConnected flips False
-kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.conditions}'
-# (optional) kubectl describe deviceprocess firmware-upgrade-tor1-01 | sed -n '/Events/,$p'
+kubectl get deviceprocess firmware-upgrade-device-02 -o jsonpath='{.status.conditions}'
+# (optional) kubectl describe deviceprocess firmware-upgrade-device-02 | sed -n '/Events/,$p'
 ```
 
 ### 12) Template change and observed hash

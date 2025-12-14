@@ -19,12 +19,10 @@ Description=Apollo DeviceProcess Agent
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/agent
+ExecStart=/bin/sh -c 'APOLLO_DEVICE_NAME="${APOLLO_DEVICE_NAME:-%H}" APOLLO_GATEWAY_URL="${APOLLO_GATEWAY_URL:?}" APOLLO_DEVICE_TOKEN="${APOLLO_DEVICE_TOKEN}" /usr/local/bin/agent'
 Restart=always
 RestartSec=2
-Environment=APOLLO_GATEWAY_URL
-Environment=APOLLO_DEVICE_NAME
-Environment=APOLLO_DEVICE_TOKEN
+PassEnvironment=APOLLO_GATEWAY_URL APOLLO_DEVICE_NAME APOLLO_DEVICE_TOKEN
 
 [Install]
 WantedBy=multi-user.target
