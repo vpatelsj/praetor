@@ -3,6 +3,8 @@ Praetor
 
 Control plane for managing processes on devices (network switches, BMCs, DPUs) without kubelets on the devices. A controller fans out `DeviceProcessDeployment` into per-device `DeviceProcess` objects; a gateway mediates all device traffic, and lightweight agents on the devices fetch desired state and report status over HTTP. The gateway can run in- or out-of-cluster, aggregates device status, and shields the apiserver from high fan-out.
 
+![Demo walkthrough](images/demo2.gif)
+
 Components
 ----------
 - **CRDs** (azure.com/v1alpha1): `NetworkSwitch` (inventory), `DeviceProcess`, `DeviceProcessDeployment` (deployment-like for hardware targets).
