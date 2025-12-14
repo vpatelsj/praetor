@@ -142,6 +142,11 @@ These agents talk to the gateway we port-forwarded in step 8. They poll the gate
 The deviceprocess objects should now show that the agents are connected and have observed the spec. they should also have events logged.
 
 ```
+kubectl get deviceprocessdeployment
+kubectl get deviceprocess
+kubectl get networkswitch
+kubectl get pods
+
 ```
 
 # Conclusion
