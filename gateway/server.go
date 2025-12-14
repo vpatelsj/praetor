@@ -64,11 +64,13 @@ type ReportRequest struct {
 
 // Observation reports the agent's view of a single DeviceProcess.
 type Observation struct {
-	Namespace        string `json:"namespace"`
-	Name             string `json:"name"`
-	ObservedSpecHash string `json:"observedSpecHash"`
-	ProcessStarted   *bool  `json:"processStarted,omitempty"`
-	Healthy          *bool  `json:"healthy,omitempty"`
+	Namespace        string  `json:"namespace"`
+	Name             string  `json:"name"`
+	ObservedSpecHash string  `json:"observedSpecHash"`
+	ProcessStarted   *bool   `json:"processStarted,omitempty"`
+	Healthy          *bool   `json:"healthy,omitempty"`
+	PID              *int64  `json:"pid,omitempty"`
+	StartTime        *string `json:"startTime,omitempty"`
 }
 
 // ReportResponse acknowledges a report.
@@ -450,6 +452,19 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionHealthy, "Unhealthy", "process reported unhealthy")
 			}
 			healthChanged = true
+		}
+
+		if obs.PID != nil {
+			proc.Status.PID = *obs.PID
+		}
+
+		if obs.StartTime != nil {
+			startTime, err := time.Parse(time.RFC3339, *obs.StartTime)
+			if err != nil {
+				return apierrors.NewBadRequest("invalid startTime")
+			}
+			t := metav1.NewTime(startTime)
+			proc.Status.StartTime = &t
 		}
 
 		if reflectDeepEqualStatus(before.Status, proc.Status) {

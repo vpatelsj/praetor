@@ -29,6 +29,7 @@ func TestReconcileCreatesDeviceProcesses(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(deployment, switchA, switchB).
+		WithStatusSubresource(&apiv1alpha1.DeviceProcessDeployment{}).
 		Build()
 
 	reconciler := &DeviceProcessDeploymentReconciler{
@@ -73,6 +74,7 @@ func TestReconcileDeletesStaleDeviceProcesses(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(deployment, switchA, switchB).
+		WithStatusSubresource(&apiv1alpha1.DeviceProcessDeployment{}).
 		Build()
 
 	reconciler := &DeviceProcessDeploymentReconciler{
@@ -252,6 +254,7 @@ func TestMatchAllSelectorReconcilesAndCleansUp(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(deployment, switchObj).
 		WithIndex(&apiv1alpha1.DeviceProcessDeployment{}, selectorKeysIndex, indexFn).
+		WithStatusSubresource(&apiv1alpha1.DeviceProcessDeployment{}).
 		Build()
 
 	reconciler := &DeviceProcessDeploymentReconciler{
