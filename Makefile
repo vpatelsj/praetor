@@ -4,13 +4,20 @@ CONTROLLER_GEN := $(shell go env GOPATH)/bin/controller-gen
 CONTROLLER_GEN_VERSION ?= v0.14.0
 IMAGE ?= apollo-deviceprocess-controller:dev
 KIND_CLUSTER ?= apollo-dev
+KIND_IMAGE ?= kindest/node:v1.29.4
 NAMESPACE ?= default
+DOCKER_GO_IMAGE ?= golang:1.22-alpine
+DOCKER_GO_RUN = docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_GO_IMAGE)
+KIND_INSTALL_CMD ?= brew install kind
+DEMO_BUILD_TARGET ?= demo-build
+FORWARD_PORT ?= 18080
+APOLLO_GATEWAY_URL ?= http://host.docker.internal:$(FORWARD_PORT)
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
-.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build
+.PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build container-build container-demo-build ensure-kind demo-up install-crs start-device-agents monitor
 
 all: fmt vet test build
 
@@ -44,13 +51,62 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-gateway ./cmd/gateway
 
 # Generate, build, image, and load into kind (controller, gateway, agent images)
-demo-build: tools generate manifests build
+demo-build: ensure-kind tools generate manifests build
 	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
 	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
 	docker build -t apollo/agent:dev -f Dockerfile.agent .
 	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
+
+# Run generate/manifests/build inside a container (uses Go 1.22) to avoid host Go constraints.
+container-build:
+	$(DOCKER_GO_RUN) sh -c "apk add --no-cache bash git make && \
+	 go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION) && \
+	 make generate manifests build CONTROLLER_GEN=/go/bin/controller-gen"
+
+# Full demo build using containerized Go for codegen/build, then local docker/kind for images.
+container-demo-build: ensure-kind container-build
+	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
+	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
+	docker build -t apollo/agent:dev -f Dockerfile.agent .
+	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
+	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
+	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
+
+# Ensure kind is available (default install via Homebrew; override KIND_INSTALL_CMD to customize).
+ensure-kind:
+	@command -v kind >/dev/null 2>&1 || (echo "kind not found; installing with '$(KIND_INSTALL_CMD)'" && $(KIND_INSTALL_CMD))
+
+# Steps 0-5 from demo.md: clean, recreate kind cluster, build/load images, install CRDs, deploy controller and gateway.
+demo-up: ensure-kind clean
+	kind delete cluster --name $(KIND_CLUSTER) || true
+	kind create cluster --name $(KIND_CLUSTER) --image $(KIND_IMAGE)
+	kubectl cluster-info --context kind-$(KIND_CLUSTER)
+	$(MAKE) $(DEMO_BUILD_TARGET)
+	$(MAKE) crd-install
+	$(MAKE) controller-deploy
+	$(MAKE) gateway-deploy
+
+# Steps 6-8: apply demo device inventory and deployment, plus a helper to port-forward the gateway.
+# Steps 6-8 combined: apply demo CRs and start gateway port-forward (blocking).
+install-crs:
+	kubectl apply -f examples/networkswitches-demo.yaml
+	kubectl apply -f examples/deviceprocessdeployment-demo.yaml
+	@echo "Port-forwarding gateway on 0.0.0.0:$(FORWARD_PORT) -> 8080 (ctrl-c to stop)"
+	kubectl -n $(NAMESPACE) port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 $(FORWARD_PORT):8080
+
+# Step 9: start demo device agents via docker compose (uses APOLLO_GATEWAY_URL env)
+start-device-agents:
+	@echo "Starting demo agents against $(APOLLO_GATEWAY_URL) (ctrl-c to stop)"
+	APOLLO_GATEWAY_URL=$(APOLLO_GATEWAY_URL) docker compose up
+
+# Quick monitor: list key resources
+monitor:
+	kubectl get deviceprocessdeployment
+	kubectl get deviceprocess
+	kubectl get networkswitch
+	kubectl get pods
 
 # Apply CRDs
 crd-install: manifests
