@@ -1,7 +1,28 @@
-## End-to-end rebuild + demo (from scratch)
 
-Executable runbook for the Apollo DeviceProcess MVP demo. The ChatGPT prompt that explains the goals lives in demo-prompt.md.
 
+
+# Quick start
+
+Demo that spins up a kind cluster, installs CRDs and controllers, applies the demo DeviceProcessDeployment that fans out two DeviceProcess objects for the demo NetworkSwitches, and then starts the device agents that update deployment status via the gateway.
+
+Terminal 1 (cluster + controller/gateway):
+```
+make demo-up
+watch make monitor
+```
+----
+Terminal 2 (apply demo CRs + port-forward gateway):
+```
+make install-crs
+```
+---
+Terminal 3 (run demo agents):
+```
+make start-device-agents
+```
+
+
+## Detailed Steps
 ### 0) Clean workspace build artifacts
 - **What:** reset local build outputs to avoid stale binaries or manifests.
 - **Expectation:** repo has no leftover bin/ artifacts; `make` rebuilds fresh.
