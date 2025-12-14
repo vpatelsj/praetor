@@ -3,7 +3,31 @@ WORKDIR /workspace
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /agent ./agent
 
-FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /agent /agent
-USER 65532
-ENTRYPOINT ["/agent"]
+FROM jrei/systemd-debian:12
+ENV container docker
+
+# prep paths systemd units will use
+RUN mkdir -p /etc/apollo/env /var/lib/apollo/agent
+
+COPY --from=builder /agent /usr/local/bin/agent
+
+# simple unit to keep the agent running under systemd inside the container
+RUN cat > /etc/systemd/system/apollo-agent.service <<'EOF' \
+ && ln -s /etc/systemd/system/apollo-agent.service /etc/systemd/system/multi-user.target.wants/apollo-agent.service
+[Unit]
+Description=Apollo DeviceProcess Agent
+After=network-online.target
+
+[Service]
+ExecStart=/bin/sh -c 'APOLLO_DEVICE_NAME="${APOLLO_DEVICE_NAME:-%H}" APOLLO_GATEWAY_URL="${APOLLO_GATEWAY_URL:?}" APOLLO_DEVICE_TOKEN="${APOLLO_DEVICE_TOKEN}" /usr/local/bin/agent'
+Restart=always
+RestartSec=2
+PassEnvironment=APOLLO_GATEWAY_URL APOLLO_DEVICE_NAME APOLLO_DEVICE_TOKEN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+STOPSIGNAL SIGRTMIN+3
+VOLUME ["/sys/fs/cgroup"]
+CMD ["/sbin/init"]

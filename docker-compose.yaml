@@ -1,17 +1,15 @@
 services:
-  agent-tor1-01:
+  agent:
     image: apollo/agent:dev
     environment:
-      APOLLO_DEVICE_NAME: tor1-01
-      APOLLO_GATEWAY_URL: ${APOLLO_GATEWAY_URL:-http://host.docker.internal:18080}  # must match FORWARD_PORT
+      APOLLO_GATEWAY_URL: ${APOLLO_GATEWAY_URL:-http://host.docker.internal:18080}
+    privileged: true
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     network_mode: bridge
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # needed on Linux
-  agent-tor1-02:
-    image: apollo/agent:dev
-    environment:
-      APOLLO_DEVICE_NAME: tor1-02
-      APOLLO_GATEWAY_URL: ${APOLLO_GATEWAY_URL:-http://host.docker.internal:18080}  # must match FORWARD_PORT
-    network_mode: bridge
-    extra_hosts:
-      - "host.docker.internal:host-gateway"   # needed on Linux
+      - "host.docker.internal:host-gateway"
+    stop_signal: SIGRTMIN+3

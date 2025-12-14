@@ -32,16 +32,16 @@ make clean || true
 rm -rf bin/
 ```
 
-### 1) Recreate kind cluster
-- **What:** provision a fresh, empty Kubernetes cluster.
-- **Expectation:** kind cluster `apollo-dev` is running and kubeconfig points to it.
-- **Why:** ensures a predictable control plane with no leftover CRs/controllers.
+### 1) Create or reset kind cluster
+- **What:** recreate the local kind cluster used for the demo.
+- **Expectation:** a fresh kind cluster named apollo-dev is running.
+- **Why:** ensures a clean control-plane target for the controller and gateway.
 ```
 export KIND_CLUSTER=apollo-dev
 kind delete cluster --name $KIND_CLUSTER || true
+make agents-down
 kind create cluster --name $KIND_CLUSTER --image kindest/node:v1.29.4
 kubectl cluster-info --context kind-$KIND_CLUSTER
-make demo-build && make crd-install && make controller-deploy && make gateway-deploy
 ```
 
 ### 2) Generate, build images, and load into kind (one command)
@@ -96,17 +96,17 @@ make gateway-deploy
 
 
 ### 6) Create device inventory objects (NetworkSwitches)
-The controller targets NetworkSwitch; create the two devices that match the selector used later. The CRD is already installed by step 3.
-- **What:** apply the demo inventory objects in [examples/networkswitches-demo.yaml](examples/networkswitches-demo.yaml) (tor1-01, tor1-02) with matching labels.
-- **Expectation:** two NetworkSwitch resources exist with site=sfo, role=tor labels.
-- **Why:** DeviceProcessDeployment selector matches these; controller will fan out per device once deployed.
+The controller targets NetworkSwitch; create one per containerized agent you plan to run. The CRD is already installed by step 3.
+- **What:** apply the demo NetworkSwitches (device-01, device-02) with the labels the demo deployment expects. Add more devices by editing `examples/networkswitches-demo.yaml` if you scale higher.
+- **Expectation:** resources exist with site=sfo, role=tor labels.
+- **Why:** DeviceProcessDeployment selector matches these devices; controller will fan out one DeviceProcess per device.
 ```
 kubectl apply -f examples/networkswitches-demo.yaml
 ```
 
 ### 7) Prepare demo DeviceProcessDeployment
-- **What:** apply the demo DeviceProcessDeployment in [examples/deviceprocessdeployment-demo.yaml](examples/deviceprocessdeployment-demo.yaml) targeting the two demo devices.
-- **Expectation:** controller creates two DeviceProcess objects (one per device) after apply.
+- **What:** apply the demo DeviceProcessDeployment in [examples/deviceprocessdeployment-demo.yaml](examples/deviceprocessdeployment-demo.yaml) targeting all devices with site=sfo, role=tor. The template uses the `systemd` backend (supported by the container systemd path and WSL).
+- **Expectation:** controller creates one DeviceProcess per device (e.g., firmware-upgrade-device-01, firmware-upgrade-device-02).
 - **Why:** shows DaemonSet-like fanout and central desired state.
 ```
 kubectl apply -f examples/deviceprocessdeployment-demo.yaml
@@ -118,49 +118,51 @@ This step only proves desired-state plumbing; the container fields are not execu
 
 
 ### 8) Make gateway reachable to local agents (port-forward)
-Use two terminals so the blocking port-forward does not hide the next commands. Bind to all interfaces so docker bridge containers can hit the forward. **Use one port everywhere; default to 18080.**
-- **What:** expose the in-cluster gateway service to the host for local docker-compose agents.
+Use two terminals so the blocking port-forward does not hide the next commands. Bind to all interfaces so containers/WSL can hit the forward. **Use one port everywhere; default to 18080.**
+- **What:** expose the in-cluster gateway service to the host for local containerized or WSL agents.
 - **Expectation:** Terminal A runs the forward; Terminal B sets APOLLO_GATEWAY_URL for later steps.
 - **Why:** agents run outside the cluster and need a stable URL to the gateway.
 
-Terminal A (blocking):
 ```
 FORWARD_PORT=18080
 kubectl -n default port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 ${FORWARD_PORT}:8080
 ```
 
-Terminal B (reuse for docker compose later):
-```
-export FORWARD_PORT=18080
-export APOLLO_GATEWAY_URL=http://host.docker.internal:${FORWARD_PORT}
 
-# quick sanity check from host (should return 200 or 304 once DeviceProcess exists)
-curl -i http://localhost:${FORWARD_PORT}/v1/devices/tor1-01/desired || true
-```
+### 9) Run systemd-capable agents in containers (WSL-friendly)
+Run one container per device with systemd PID1. Use the provided make target to start them with the Docker bridge gateway IP (works on WSL when host.docker.internal does not resolve).
+- **What:** start two sample agents (device-01, device-02); scale by editing `AGENT_NAMES` in the Makefile or overriding on the command line.
+- **Expectation:** each container hostname/device name matches a NetworkSwitch from step 6 and becomes Ready.
+- **Why:** demonstrates multi-device fanout without extra VMs.
 
 
-### 9) Run local agents via docker compose (no Kubernetes access)
-In the same shell where `APOLLO_GATEWAY_URL` is exported from step 8, use the repo compose file so it picks up the correct port. If your gateway expects auth, add `APOLLO_DEVICE_TOKEN` (or remove it if running in insecure mode).
-- **What:** start two agent containers that poll the gateway and report status; no kube creds.
-- **Expectation:** agents connect over HTTP to the forwarded gateway URL and fetch desired state.
-- **Why:** demonstrates edge connectivity and that agents never contact the apiserver directly.
+Start containers (uses Docker bridge IP automatically):
 ```
-docker compose up         # uses ./docker-compose.yaml with agent-tor1-01 and agent-tor1-02
+make agents-up                # uses AGENT_NAMES=device-01 device-02 and AGENT_GATEWAY=http://<docker-bridge-ip>:18080
 ```
+
+Stop them when done:
+```
+make agents-down
+```
+
+Check inside one container if needed:
+```
+docker exec -it device-01 bash -lc "systemctl status apollo-agent --no-pager"
+```
+
 
 ### 10) Verify status and events
-- **What:** check that DeviceProcess objects reflect agent connection and observed spec.
-- **Expectation:** conditions show AgentConnected=True, SpecObserved=True, observedSpecHash set; events exist.
-- **Why:** proves the gateway writes status/events back based on agent reports.
+- **What:** check that DeviceProcess objects reflect agent connection, observed spec, and now the runtime info (pid/startTime) coming from the systemd backend.
+- **Expectation:** conditions show AgentConnected=True, SpecObserved=True, ProcessStarted=True; observedSpecHash is set; `status.pid` and `status.startTime` are populated when systemd is available; events exist.
+- **Why:** proves the gateway writes status/events back based on agent reports and the systemd runtime data.
 
-we installed two networkswitches (tor1-01, tor1-02)  
-We installed a deviceprocessdeployment firmware-upgrade that targets those switches, so the controller should have created two deviceprocesses (firmware-upgrade-tor1-01, firmware-upgrade-tor1-02).
+We installed two networkswitches (device-01, device-02).
+We installed a deviceprocessdeployment firmware-upgrade that targets those switches, so the controller should have created matching deviceprocesses (firmware-upgrade-device-01, firmware-upgrade-device-02).
 
-We then started two agents via docker compose, one for each device.
+We then started the agents inside containers with systemd PID1. They talk to the gateway we port-forwarded in step 8. They poll the gateway, get their desired state, and report status back.
 
-These agents talk to the gateway we port-forwarded in step 8. They poll the gateway, get their desired state, and report status back.
-
-The deviceprocess objects should now show that the agents are connected and have observed the spec. they should also have events logged.
+The deviceprocess objects should now show that the agents are connected and have observed the spec. They should also have events logged.
 
 ```
 kubectl get deviceprocessdeployment
@@ -168,12 +170,27 @@ kubectl get deviceprocess
 kubectl get networkswitch
 kubectl get pods
 
+# check pid/startTime fields on one of the deviceprocesses
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.pid}{"\\n"}'
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.startTime}{"\\n"}'
+
 ```
 
-# Conclusion
 
+# Optional: run the agent directly on another systemd host
 
+- **Why:** quick path if you already have a systemd-capable host/VM outside WSL.
+- **Prep:** build the agent binary (`make demo-build`) and ensure the port-forward from step 8 is running.
 
+```
+# run the agent locally as root so it can manage systemd; reuse the forwarded gateway port
+sudo env APOLLO_DEVICE_NAME=device-01 APOLLO_GATEWAY_URL=${APOLLO_GATEWAY_URL:-http://localhost:18080} \
+  ./bin/apollo-deviceprocess-agent
+
+# confirm runtime data flows back into status
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.pid}{"\\n"}'
+kubectl get deviceprocess firmware-upgrade-device-01 -o jsonpath='{.status.startTime}{"\\n"}'
+```
 
 
 -----
@@ -187,20 +204,20 @@ Use a new terminal from this step onward; the log follow blocks.
 
 ```
 # Show ETag behavior (non-blocking)
-curl -i http://localhost:${FORWARD_PORT:-18080}/v1/devices/tor1-01/desired | tee /tmp/desired.txt
+curl -i http://localhost:${FORWARD_PORT:-18080}/v1/devices/device-01/desired | tee /tmp/desired.txt
 etag=$(grep -i ETag /tmp/desired.txt | awk '{print $2}')
-curl -i -H "If-None-Match: ${etag}" http://localhost:${FORWARD_PORT:-18080}/v1/devices/tor1-01/desired
+curl -i -H "If-None-Match: ${etag}" http://localhost:${FORWARD_PORT:-18080}/v1/devices/device-01/desired
 
 # Follow gateway events (blocking; do in this terminal)
 kubectl -n default logs -f deploy/apollo-deviceprocess-gateway
 ```
 
-In another terminal:
+In another terminal, stop one container agent to simulate staleness:
 ```
-docker compose stop agent-tor1-02
+docker stop device-02
 sleep 45   # wait past stale timeout (default ~30s) so AgentConnected flips False
-kubectl get deviceprocess firmware-upgrade-tor1-02 -o jsonpath='{.status.conditions}'
-# (optional) kubectl describe deviceprocess firmware-upgrade-tor1-02 | sed -n '/Events/,$p'
+kubectl get deviceprocess firmware-upgrade-device-02 -o jsonpath='{.status.conditions}'
+# (optional) kubectl describe deviceprocess firmware-upgrade-device-02 | sed -n '/Events/,$p'
 ```
 
 ### 12) Template change and observed hash
@@ -214,6 +231,8 @@ kubectl patch deviceprocessdeployment firmware-upgrade --type merge \
 kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.observedSpecHash}'
 sleep 10
 kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.observedSpecHash}'
+# optional: watch startTime change after restart (systemd backend)
+kubectl get deviceprocess firmware-upgrade-tor1-01 -o jsonpath='{.status.startTime}{"\\n"}'
 ```
 
 ### 13) Cleanup
