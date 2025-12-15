@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,22 @@ import (
 type seqRunner struct {
 	calls     [][]string
 	showCount int
+}
+
+type fixedShowRunner struct {
+	calls   [][]string
+	showOut []byte
+}
+
+func (r *fixedShowRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, append([]string{}, args...))
+	if len(args) == 0 {
+		return nil, nil
+	}
+	if args[0] == "show" {
+		return r.showOut, nil
+	}
+	return []byte(""), nil
 }
 
 func (r *seqRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -117,5 +134,91 @@ func TestReconcileStartsStoppedService(t *testing.T) {
 			sb.WriteByte('\n')
 		}
 		t.Fatalf("expected systemctl enable --now to be called; calls:\n%s", sb.String())
+	}
+}
+
+func TestReconcileClearsStartTimeWhenInactiveEvenIfTimestampPresent(t *testing.T) {
+	ctx := context.Background()
+	unitDir := filepath.Join(t.TempDir(), "units")
+	envDir := filepath.Join(t.TempDir(), "env")
+	restorePaths := systemd.SetBasePathsForTesting(unitDir, envDir)
+	defer restorePaths()
+
+	runner := &fixedShowRunner{showOut: []byte("MainPID=0\nExecMainStartTimestamp=Tue 2024-02-13 14:22:11 UTC\nActiveState=inactive\nSubState=dead\n")}
+	restoreRunner := systemd.SetRunnerForTesting(runner)
+	defer restoreRunner()
+
+	item := gateway.DesiredItem{
+		Namespace: "ns",
+		Name:      "proc",
+		SpecHash:  "h1",
+		Spec: apiv1alpha1.DeviceProcessSpec{
+			Execution: apiv1alpha1.DeviceProcessExecution{
+				Backend: apiv1alpha1.DeviceProcessBackendSystemd,
+				Command: []string{"/usr/bin/app"},
+				Args:    []string{"--flag"},
+			},
+			RestartPolicy: apiv1alpha1.DeviceProcessRestartPolicyNever,
+		},
+	}
+
+	paths := systemd.PathsFor(item.Namespace, item.Name)
+	unitContent, envContent, err := renderUnitFiles(item, paths.EnvPath)
+	if err != nil {
+		t.Fatalf("renderUnitFiles: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.UnitPath), 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.EnvPath), 0o755); err != nil {
+		t.Fatalf("mkdir env dir: %v", err)
+	}
+	if err := os.WriteFile(paths.UnitPath, []byte(unitContent), 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	if err := os.WriteFile(paths.EnvPath, []byte(envContent), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+
+	ag := &agent{
+		logger:       logr.Discard(),
+		managed:      map[string]managedItem{},
+		statePath:    filepath.Join(t.TempDir(), "state.json"),
+		lastObserved: map[string]string{},
+	}
+
+	// Prevent drift-correction start attempts so we observe the raw inactive state.
+	key := itemKey(item.Namespace, item.Name)
+	ag.managed[key] = managedItem{
+		UnitName:           paths.UnitName,
+		LastActionAt:       time.Now().UTC().Format(time.RFC3339),
+		LastActionSpecHash: item.SpecHash,
+	}
+
+	desired := &gateway.DesiredResponse{Items: []gateway.DesiredItem{item}}
+	obs, err := ag.reconcile(ctx, desired)
+	if err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+	if len(obs) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(obs))
+	}
+	if obs[0].PID != 0 {
+		t.Fatalf("expected pid=0 when inactive, got %d", obs[0].PID)
+	}
+	if obs[0].StartTime != "" {
+		t.Fatalf("expected startTime cleared when inactive, got %q", obs[0].StartTime)
+	}
+
+	b, err := json.Marshal(obs[0])
+	if err != nil {
+		t.Fatalf("marshal observation: %v", err)
+	}
+	js := string(b)
+	if !strings.Contains(js, `"pid":0`) {
+		t.Fatalf("expected pid field in JSON, got %s", js)
+	}
+	if !strings.Contains(js, `"startTime":""`) {
+		t.Fatalf("expected startTime cleared in JSON, got %s", js)
 	}
 }

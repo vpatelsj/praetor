@@ -363,15 +363,20 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				}
 			}
 
-			started := pid > 0 && (activeState == "active" || activeState == "activating" || activeState == "reloading")
-			observation.ProcessStarted = boolPtr(started)
-			observation.Healthy = boolPtr(started)
-			observation.PID = pid
-			if !startTime.IsZero() {
-				ts := startTime.UTC().Format(time.RFC3339)
-				observation.StartTime = ts
-			} else {
+			processStarted := activeState == "active" && pid > 0
+			observation.ProcessStarted = boolPtr(processStarted)
+			observation.Healthy = boolPtr(processStarted)
+			if !processStarted {
+				// systemctl show may keep ExecMainStartTimestamp populated even after stop.
+				observation.PID = 0
 				observation.StartTime = ""
+			} else {
+				observation.PID = pid
+				if !startTime.IsZero() {
+					observation.StartTime = startTime.UTC().Format(time.RFC3339)
+				} else {
+					observation.StartTime = ""
+				}
 			}
 
 			a.logger.V(1).Info("unit status", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName, "active", activeState, "sub", subState, "pid", pid, "start", startTime)
