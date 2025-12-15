@@ -11,6 +11,20 @@ AGENT_GATEWAY ?= http://host.docker.internal:$(FORWARD_PORT)
 AGENT_NAMES ?= device-01 device-02
 DOCKER_GO_IMAGE ?= golang:1.22-alpine
 DOCKER_GO_RUN = docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_GO_IMAGE)
+BUILDX_BUILDER ?= apollo-builder
+DOCKER_PLATFORM ?= linux/$(shell go env GOARCH)
+DOCKER_CACHE_DIR ?= .docker-cache
+DOCKER_CACHE_FROM := $(shell test -d $(DOCKER_CACHE_DIR) && echo --cache-from type=local,src=$(DOCKER_CACHE_DIR))
+BUILDX_AVAILABLE := $(shell docker buildx version >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(BUILDX_AVAILABLE),1)
+DOCKER_BUILD_CMD ?= DOCKER_BUILDKIT=1 docker buildx build --builder $(BUILDX_BUILDER)
+DOCKER_BUILD_LOAD ?= --load
+else
+DOCKER_BUILD_CMD ?= DOCKER_BUILDKIT=1 docker build
+DOCKER_BUILD_LOAD ?=
+endif
+DOCKER_CACHE_TO ?=
+DOCKER_BUILD_OPTS ?= --platform $(DOCKER_PLATFORM) --build-arg BUILDKIT_INLINE_CACHE=1 $(DOCKER_BUILD_LOAD) $(DOCKER_CACHE_FROM) $(DOCKER_CACHE_TO)
 KIND_INSTALL_CMD ?= brew install kind
 DEMO_BUILD_TARGET ?= demo-build
 
@@ -20,6 +34,7 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 LDFLAGS := -X github.com/apollo/praetor/pkg/version.Version=$(VERSION) -X github.com/apollo/praetor/pkg/version.Commit=$(COMMIT)
 
 .PHONY: all fmt vet test generate manifests build tools crd-install controller-deploy kind-image kind-load kind-deploy kind-restart kind-clean clean gateway-deploy demo-build container-build container-demo-build ensure-kind demo-up install-crs start-device-agents monitor stop-device-agents
+ .PHONY: ensure-buildx
 
 all: fmt vet test build
 
@@ -53,10 +68,10 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-gateway ./cmd/gateway
 
 # Generate, build, image, and load into kind (controller, gateway, agent images)
-demo-build: ensure-kind tools generate manifests build
-	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
-	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
-	docker build -t apollo/agent:dev -f Dockerfile.agent .
+demo-build: ensure-kind ensure-buildx tools generate manifests build
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/gateway:dev -f Dockerfile.gateway .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/agent:dev -f Dockerfile.agent .
 	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
@@ -68,10 +83,10 @@ container-build:
 	 make generate manifests build CONTROLLER_GEN=/go/bin/controller-gen"
 
 # Full demo build using containerized Go for codegen/build, then local docker/kind for images.
-container-demo-build: ensure-kind container-build
-	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
-	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
-	docker build -t apollo/agent:dev -f Dockerfile.agent .
+container-demo-build: ensure-kind ensure-buildx container-build
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/gateway:dev -f Dockerfile.gateway .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/agent:dev -f Dockerfile.agent .
 	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
@@ -174,3 +189,17 @@ clean-all:
 	rm -rf bin
 	docker rmi apollo/agent:dev apollo/gateway:dev apollo/controller:dev apollo-deviceprocess-controller:dev 2>/dev/null || true
 	@echo "Cleanup complete"
+
+# Ensure a buildx builder is available and selected.
+ensure-buildx:
+ifeq ($(BUILDX_AVAILABLE),1)
+	@if ! docker buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
+		echo "Creating buildx builder '$(BUILDX_BUILDER)'"; \
+		docker buildx create --name $(BUILDX_BUILDER) --use >/dev/null; \
+	else \
+		docker buildx use $(BUILDX_BUILDER) >/dev/null; \
+	fi
+	@docker buildx inspect $(BUILDX_BUILDER) --bootstrap >/dev/null
+else
+	@echo "docker buildx not found; install Docker Buildx plugin or upgrade Docker Desktop." && exit 1
+endif
