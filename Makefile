@@ -10,10 +10,11 @@ FORWARD_PORT ?= 18080
 AGENT_GATEWAY ?= http://host.docker.internal:$(FORWARD_PORT)
 AGENT_NAMES ?= device-01 device-02
 APOLLO_OCI_PLAIN_HTTP ?= 1
-APOLLO_OCI_PLAIN_HTTP_HOSTS ?= host.docker.internal:5000
+REGISTRY_PORT ?= 5001
+APOLLO_OCI_PLAIN_HTTP_HOSTS ?= host.docker.internal:$(REGISTRY_PORT)
 PAYLOAD_DIR ?= /tmp/payload
 PAYLOAD_TAR ?= /tmp/payload.tar
-REGISTRY ?= localhost:5000
+REGISTRY ?= localhost:$(REGISTRY_PORT)
 LOG_FORWARDER_REPO ?= log-forwarder
 LOG_FORWARDER_TAG ?= demo
 LOG_FORWARDER_REF := $(REGISTRY)/$(LOG_FORWARDER_REPO):$(LOG_FORWARDER_TAG)
@@ -78,7 +79,7 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/apollo-deviceprocess-gateway ./cmd/gateway
 
 # Generate, build, image, and load into kind (controller, gateway, agent images)
-demo-build: ensure-kind ensure-kind-cluster ensure-buildx tools generate manifests build
+demo-build: ensure-docker ensure-kind ensure-oras ensure-kind-cluster ensure-buildx tools generate manifests build
 	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
 	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/gateway:dev -f Dockerfile.gateway .
 	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/agent:dev -f Dockerfile.agent .
@@ -94,7 +95,7 @@ container-build:
 	 make generate manifests build CONTROLLER_GEN=/go/bin/controller-gen"
 
 # Full demo build using containerized Go for codegen/build, then local docker/kind for images.
-container-demo-build: ensure-kind ensure-kind-cluster ensure-buildx container-build
+container-demo-build: ensure-docker ensure-kind ensure-oras ensure-kind-cluster ensure-buildx container-build
 	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
 	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/gateway:dev -f Dockerfile.gateway .
 	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/agent:dev -f Dockerfile.agent .
@@ -107,6 +108,15 @@ container-demo-build: ensure-kind ensure-kind-cluster ensure-buildx container-bu
 ensure-kind:
 	@command -v kind >/dev/null 2>&1 || (echo "kind not found; installing with '$(KIND_INSTALL_CMD)'" && $(KIND_INSTALL_CMD))
 
+# Ensure oras is available (install via Homebrew if missing).
+ensure-oras:
+	@command -v oras >/dev/null 2>&1 || (echo "oras not found; installing with 'brew install oras'" && brew install oras)
+
+# Ensure docker is available and running.
+ensure-docker:
+	@command -v docker >/dev/null 2>&1 || (echo "docker not found; please install Docker Desktop" && exit 1)
+	@docker info >/dev/null 2>&1 || (echo "docker daemon not running; please start Docker Desktop" && exit 1)
+
 # Build single-layer payload tar, run local registry, push, and record digest.
 payload-build-push:
 	@echo "Building demo payload tar at $(PAYLOAD_TAR)"
@@ -116,9 +126,9 @@ payload-build-push:
 	chmod +x $(PAYLOAD_DIR)/bin/log-forwarder
 	echo 'log: info' > $(PAYLOAD_DIR)/config/log-forwarder.yaml
 	tar -C $(dir $(PAYLOAD_DIR)) -cf $(PAYLOAD_TAR) payload
-	@echo "Starting local registry on 5000 (apollo-registry)"
+	@echo "Starting local registry on $(REGISTRY_PORT) (apollo-registry)"
 	docker rm -f apollo-registry 2>/dev/null || true
-	docker run -d --name apollo-registry -p 5000:5000 registry:2
+	docker run -d --name apollo-registry -p $(REGISTRY_PORT):5000 registry:2
 	@echo "Pushing payload to $(LOG_FORWARDER_REF)"
 	(cd /tmp && oras push $(LOG_FORWARDER_REF) payload.tar:application/vnd.oci.image.layer.v1.tar)
 	@echo "Fetching digest for $(LOG_FORWARDER_REF)"
@@ -164,7 +174,7 @@ install-crs: crd-install controller-deploy gateway-deploy
 	  fi; \
 	  DIGEST=$$(cat $(LOG_FORWARDER_DIGEST_FILE)); \
 	  echo "Applying DeviceProcessDeployment with digest $$DIGEST"; \
-	  sed "s|sha256:REPLACE_ME|$${DIGEST}|" $(DEPLOYMENT_FILE) | sed 's|localhost:5000|host.docker.internal:5000|' | kubectl apply -f -
+	  sed "s|sha256:REPLACE_ME|$${DIGEST}|" $(DEPLOYMENT_FILE) | sed "s|localhost:$(REGISTRY_PORT)|host.docker.internal:$(REGISTRY_PORT)|" | kubectl apply -f -
 
 # Quick monitor: list key resources
 monitor:

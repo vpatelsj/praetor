@@ -16,7 +16,7 @@ spec:
     spec:
       artifact:
         type: oci
-        url: localhost:5000/log-forwarder@sha256:REPLACE_ME
+        url: localhost:5001/log-forwarder@sha256:REPLACE_ME
       execution:
         backend: systemd
         command:
