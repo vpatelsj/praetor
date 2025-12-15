@@ -3,6 +3,31 @@ Praetor
 
 Control plane for managing processes on devices (network switches, BMCs, DPUs) without kubelets on the devices. A controller fans out `DeviceProcessDeployment` into per-device `DeviceProcess` objects; a gateway mediates all device traffic, and lightweight agents on the devices fetch desired state and report status over HTTP. The gateway can run in- or out-of-cluster, aggregates device status, and shields the apiserver from high fan-out.
 
+
+
+
+Quick Start
+-----------
+
+Spin up a kind cluster, installs CRDs and controllers, applies the demo DeviceProcessDeployment that fans out two DeviceProcess objects for the demo NetworkSwitches, and then starts the device agents that update deployment status via the gateway.
+
+Terminal 1 (cluster + controller/gateway):
+```
+make demo-up
+watch make monitor
+```
+----
+Terminal 2 (apply demo CRs + port-forward gateway):
+```
+make install-crs
+```
+---
+Terminal 3 (run demo agents):
+```
+make start-device-agents
+```
+
+
 ![Demo walkthrough](images/demo2.gif)
 
 Components
