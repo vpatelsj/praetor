@@ -163,7 +163,11 @@ func IsUnitNotFoundError(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "could not be found") || strings.Contains(s, "not-found") || strings.Contains(s, "loaded: not-found")
+	return strings.Contains(s, "could not be found") ||
+		strings.Contains(s, "not-found") ||
+		strings.Contains(s, "loaded: not-found") ||
+		strings.Contains(s, "does not exist") ||
+		strings.Contains(s, "unit file") && strings.Contains(s, "does not exist")
 }
 
 // Show returns runtime info for a unit.

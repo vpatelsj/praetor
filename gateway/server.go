@@ -439,9 +439,6 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 		if obs.ProcessStarted != nil {
 			if *obs.ProcessStarted {
 				conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessStarted", "process started")
-				if proc.Status.Phase == apiv1alpha1.DeviceProcessPhasePending || proc.Status.Phase == "" {
-					proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
-				}
 			} else {
 				if obs.ErrorMessage != nil && strings.TrimSpace(*obs.ErrorMessage) != "" {
 					conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ReconcileError", strings.TrimSpace(*obs.ErrorMessage))
@@ -452,13 +449,37 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			processStartedChanged = true
 		}
 
+		// Normalize phase to avoid inconsistencies like Running + ProcessStarted=false.
+		errMsg := ""
+		if obs.ErrorMessage != nil {
+			errMsg = strings.TrimSpace(*obs.ErrorMessage)
+		}
+		switch {
+		case errMsg != "":
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseFailed
+		case obs.ProcessStarted != nil && *obs.ProcessStarted:
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
+		default:
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
+		}
+
 		specWarningChanged := false
-		if obs.WarningMessage != nil && strings.TrimSpace(*obs.WarningMessage) != "" {
-			msg := strings.TrimSpace(*obs.WarningMessage)
-			if existing := conditions.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning); existing == nil || existing.Status != metav1.ConditionTrue || existing.Message != msg {
+		warnMsg := ""
+		if obs.WarningMessage != nil {
+			warnMsg = strings.TrimSpace(*obs.WarningMessage)
+		}
+		if warnMsg != "" {
+			if existing := conditions.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning); existing == nil || existing.Status != metav1.ConditionTrue || existing.Message != warnMsg {
 				specWarningChanged = true
 			}
-			conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning, "SpecWarning", msg)
+			conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning, "SpecWarning", warnMsg)
+		} else {
+			if existing := conditions.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning); existing != nil {
+				if existing.Status != metav1.ConditionFalse || existing.Reason != "NoSpecWarning" || existing.Message != "no spec warning" {
+					specWarningChanged = true
+				}
+				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning, "NoSpecWarning", "no spec warning")
+			}
 		}
 
 		healthChanged := false

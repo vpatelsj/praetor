@@ -267,6 +267,16 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.Healthy = boolPtr(false)
 			observation.ErrorMessage = stringPtr(err.Error())
 			_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
+
+			// Strict failure behavior: do not keep stale artifacts around on invalid spec.
+			unitRemoved, _, removeErr := systemd.RemoveUnitWithDetails(ctx, paths.UnitName, paths.UnitPath, paths.EnvPath)
+			if removeErr != nil {
+				a.logger.Error(removeErr, "remove unit artifacts after render failure", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
+			} else if unitRemoved {
+				if err := systemd.DaemonReload(ctx); err != nil {
+					a.logger.Error(err, "daemon-reload after unit removal", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
+				}
+			}
 			obs = append(obs, observation)
 			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
 			continue
@@ -335,8 +345,8 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 					actionErr = systemd.Restart(ctx, paths.UnitName)
 					currentManaged = markAction(currentManaged, item.SpecHash, "restart-drift")
 				} else {
-					actionErr = systemd.Start(ctx, paths.UnitName)
-					currentManaged = markAction(currentManaged, item.SpecHash, "start-drift")
+					actionErr = systemd.EnableAndStart(ctx, paths.UnitName)
+					currentManaged = markAction(currentManaged, item.SpecHash, "enable-and-start-drift")
 				}
 				if actionErr != nil {
 					a.logger.Error(actionErr, "drift correction failed", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
@@ -422,12 +432,18 @@ func renderUnitFiles(item gateway.DesiredItem, envPath string) (string, string, 
 	unit := &strings.Builder{}
 	fmt.Fprintf(unit, "[Unit]\nDescription=Apollo DeviceProcess %s/%s\nAfter=network.target\n\n", item.Namespace, item.Name)
 	fmt.Fprintf(unit, "[Service]\nType=simple\nExecStart=%s\n", execStart)
+	if err := ValidateUnitField("workingDir", item.Spec.Execution.WorkingDir); err != nil {
+		return "", "", err
+	}
 	if wd := strings.TrimSpace(item.Spec.Execution.WorkingDir); wd != "" {
 		fmt.Fprintf(unit, "WorkingDirectory=%s\n", wd)
 	}
 	fmt.Fprintf(unit, "EnvironmentFile=-%s\n", envPath)
 	systemdRestartMode := renderSystemdRestartMode(item.Spec.RestartPolicy)
 	fmt.Fprintf(unit, "Restart=%s\n", systemdRestartMode)
+	if err := ValidateUnitField("user", item.Spec.Execution.User); err != nil {
+		return "", "", err
+	}
 	if user := strings.TrimSpace(item.Spec.Execution.User); user != "" {
 		fmt.Fprintf(unit, "User=%s\n", user)
 	}
@@ -466,6 +482,17 @@ func escapeSystemdArg(arg string) (string, error) {
 		return "\"" + escaped + "\"", nil
 	}
 	return arg, nil
+}
+
+// ValidateUnitField rejects values that could inject additional systemd unit directives.
+// We reject any ASCII control characters (< 0x20), including newlines.
+func ValidateUnitField(label, value string) error {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 {
+			return fmt.Errorf("invalid %s: contains control character", label)
+		}
+	}
+	return nil
 }
 
 func renderSystemdRestartMode(policy apiv1alpha1.DeviceProcessRestartPolicy) string {

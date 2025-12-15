@@ -105,7 +105,7 @@ func TestReconcileStartsStoppedService(t *testing.T) {
 
 	started := false
 	for _, c := range runner.calls {
-		if len(c) >= 2 && c[0] == "start" && c[1] == paths.UnitName {
+		if len(c) >= 3 && c[0] == "enable" && c[1] == "--now" && c[2] == paths.UnitName {
 			started = true
 			break
 		}
@@ -116,6 +116,6 @@ func TestReconcileStartsStoppedService(t *testing.T) {
 			sb.WriteString(strings.Join(c, " "))
 			sb.WriteByte('\n')
 		}
-		t.Fatalf("expected systemctl start to be called; calls:\n%s", sb.String())
+		t.Fatalf("expected systemctl enable --now to be called; calls:\n%s", sb.String())
 	}
 }

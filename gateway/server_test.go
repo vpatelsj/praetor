@@ -76,3 +76,113 @@ func TestObservationClearsStalePIDAndStartTime(t *testing.T) {
 		t.Fatalf("expected startTime cleared, got %v", got.Status.StartTime)
 	}
 }
+
+func findCondition(conds []metav1.Condition, typ apiv1alpha1.ConditionType) *metav1.Condition {
+	for i := range conds {
+		if conds[i].Type == string(typ) {
+			return &conds[i]
+		}
+	}
+	return nil
+}
+
+func TestSpecWarningClearsWhenWarningMissing(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+
+	proc := &apiv1alpha1.DeviceProcess{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: apiv1alpha1.DeviceProcessSpec{
+			DeviceRef: apiv1alpha1.DeviceRef{Kind: apiv1alpha1.DeviceRefKindServer, Name: "dev"},
+			Execution: apiv1alpha1.DeviceProcessExecution{Backend: apiv1alpha1.DeviceProcessBackendSystemd, Command: []string{"/bin/true"}},
+			Artifact:  apiv1alpha1.DeviceProcessArtifact{Type: apiv1alpha1.ArtifactTypeFile, URL: "/bin/true"},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(proc).WithStatusSubresource(&apiv1alpha1.DeviceProcess{}).Build()
+	g := &Gateway{client: c, recorder: nopRecorder{}}
+
+	warn := "restartPolicy=Never is advisory"
+	obs1 := Observation{Namespace: "ns", Name: "p", ObservedSpecHash: "h1", ProcessStarted: boolPtr(true), Healthy: boolPtr(true), WarningMessage: &warn, PID: 123}
+	if err := g.updateStatusForObservation(ctx, "dev", obs1, nil); err != nil {
+		t.Fatalf("updateStatusForObservation(1): %v", err)
+	}
+
+	var got1 apiv1alpha1.DeviceProcess
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "p"}, &got1); err != nil {
+		t.Fatalf("get(1): %v", err)
+	}
+	cond1 := findCondition(got1.Status.Conditions, apiv1alpha1.ConditionSpecWarning)
+	if cond1 == nil || cond1.Status != metav1.ConditionTrue {
+		t.Fatalf("expected SpecWarning true, got %#v", cond1)
+	}
+
+	obs2 := Observation{Namespace: "ns", Name: "p", ObservedSpecHash: "h2", ProcessStarted: boolPtr(true), Healthy: boolPtr(true), PID: 123}
+	if err := g.updateStatusForObservation(ctx, "dev", obs2, nil); err != nil {
+		t.Fatalf("updateStatusForObservation(2): %v", err)
+	}
+
+	var got2 apiv1alpha1.DeviceProcess
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "p"}, &got2); err != nil {
+		t.Fatalf("get(2): %v", err)
+	}
+	cond2 := findCondition(got2.Status.Conditions, apiv1alpha1.ConditionSpecWarning)
+	if cond2 == nil || cond2.Status != metav1.ConditionFalse {
+		t.Fatalf("expected SpecWarning false after clearing, got %#v", cond2)
+	}
+}
+
+func TestPhaseMappingFromObservation(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+
+	proc := &apiv1alpha1.DeviceProcess{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: apiv1alpha1.DeviceProcessSpec{
+			DeviceRef: apiv1alpha1.DeviceRef{Kind: apiv1alpha1.DeviceRefKindServer, Name: "dev"},
+			Execution: apiv1alpha1.DeviceProcessExecution{Backend: apiv1alpha1.DeviceProcessBackendSystemd, Command: []string{"/bin/true"}},
+			Artifact:  apiv1alpha1.DeviceProcessArtifact{Type: apiv1alpha1.ArtifactTypeFile, URL: "/bin/true"},
+		},
+		Status: apiv1alpha1.DeviceProcessStatus{Phase: apiv1alpha1.DeviceProcessPhaseRunning},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(proc).WithStatusSubresource(&apiv1alpha1.DeviceProcess{}).Build()
+	g := &Gateway{client: c, recorder: nopRecorder{}}
+
+	obs1 := Observation{Namespace: "ns", Name: "p", ObservedSpecHash: "h1", ProcessStarted: boolPtr(false), Healthy: boolPtr(false), PID: 0}
+	if err := g.updateStatusForObservation(ctx, "dev", obs1, nil); err != nil {
+		t.Fatalf("updateStatusForObservation(1): %v", err)
+	}
+	var got1 apiv1alpha1.DeviceProcess
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "p"}, &got1); err != nil {
+		t.Fatalf("get(1): %v", err)
+	}
+	if got1.Status.Phase != apiv1alpha1.DeviceProcessPhasePending {
+		t.Fatalf("expected phase Pending, got %q", got1.Status.Phase)
+	}
+
+	obs2 := Observation{Namespace: "ns", Name: "p", ObservedSpecHash: "h2", ProcessStarted: boolPtr(true), Healthy: boolPtr(true), PID: 12}
+	if err := g.updateStatusForObservation(ctx, "dev", obs2, nil); err != nil {
+		t.Fatalf("updateStatusForObservation(2): %v", err)
+	}
+	var got2 apiv1alpha1.DeviceProcess
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "p"}, &got2); err != nil {
+		t.Fatalf("get(2): %v", err)
+	}
+	if got2.Status.Phase != apiv1alpha1.DeviceProcessPhaseRunning {
+		t.Fatalf("expected phase Running, got %q", got2.Status.Phase)
+	}
+
+	errMsg := "boom"
+	obs3 := Observation{Namespace: "ns", Name: "p", ObservedSpecHash: "h3", ProcessStarted: boolPtr(false), Healthy: boolPtr(false), ErrorMessage: &errMsg, PID: 0}
+	if err := g.updateStatusForObservation(ctx, "dev", obs3, nil); err != nil {
+		t.Fatalf("updateStatusForObservation(3): %v", err)
+	}
+	var got3 apiv1alpha1.DeviceProcess
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "p"}, &got3); err != nil {
+		t.Fatalf("get(3): %v", err)
+	}
+	if got3.Status.Phase != apiv1alpha1.DeviceProcessPhaseFailed {
+		t.Fatalf("expected phase Failed, got %q", got3.Status.Phase)
+	}
+}
