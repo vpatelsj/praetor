@@ -69,9 +69,13 @@ type Observation struct {
 	ObservedSpecHash string  `json:"observedSpecHash"`
 	ProcessStarted   *bool   `json:"processStarted,omitempty"`
 	Healthy          *bool   `json:"healthy,omitempty"`
-	PID              *int64  `json:"pid,omitempty"`
-	StartTime        *string `json:"startTime,omitempty"`
+	PID              int64   `json:"pid"`
+	StartTime        string  `json:"startTime"`
+	ErrorMessage     *string `json:"errorMessage,omitempty"`
+	WarningMessage   *string `json:"warningMessage,omitempty"`
 }
+
+const runtimeSemanticsDaemonSet = "DaemonSet"
 
 // ReportResponse acknowledges a report.
 type ReportResponse struct {
@@ -416,6 +420,9 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
 		}
 
+		// DeviceProcess resources have DaemonSet semantics: resource present => agent enforces Running.
+		proc.Status.RuntimeSemantics = runtimeSemanticsDaemonSet
+
 		connectedChanged := setAgentConnected(&proc.Status, true, connectedReason, connectedMessage)
 		specObservedChanged := false
 		if obs.ObservedSpecHash != "" && proc.Status.ObservedSpecHash != obs.ObservedSpecHash {
@@ -432,13 +439,47 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 		if obs.ProcessStarted != nil {
 			if *obs.ProcessStarted {
 				conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessStarted", "process started")
-				if proc.Status.Phase == apiv1alpha1.DeviceProcessPhasePending || proc.Status.Phase == "" {
-					proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
-				}
 			} else {
-				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessNotStarted", "process not started")
+				if obs.ErrorMessage != nil && strings.TrimSpace(*obs.ErrorMessage) != "" {
+					conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ReconcileError", strings.TrimSpace(*obs.ErrorMessage))
+				} else {
+					conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessNotStarted", "process not started")
+				}
 			}
 			processStartedChanged = true
+		}
+
+		// Normalize phase to avoid inconsistencies like Running + ProcessStarted=false.
+		errMsg := ""
+		if obs.ErrorMessage != nil {
+			errMsg = strings.TrimSpace(*obs.ErrorMessage)
+		}
+		switch {
+		case errMsg != "":
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseFailed
+		case obs.ProcessStarted != nil && *obs.ProcessStarted:
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
+		default:
+			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
+		}
+
+		specWarningChanged := false
+		warnMsg := ""
+		if obs.WarningMessage != nil {
+			warnMsg = strings.TrimSpace(*obs.WarningMessage)
+		}
+		if warnMsg != "" {
+			if existing := conditions.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning); existing == nil || existing.Status != metav1.ConditionTrue || existing.Message != warnMsg {
+				specWarningChanged = true
+			}
+			conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning, "SpecWarning", warnMsg)
+		} else {
+			if existing := conditions.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning); existing != nil {
+				if existing.Status != metav1.ConditionFalse || existing.Reason != "NoSpecWarning" || existing.Message != "no spec warning" {
+					specWarningChanged = true
+				}
+				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning, "NoSpecWarning", "no spec warning")
+			}
 		}
 
 		healthChanged := false
@@ -454,12 +495,11 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			healthChanged = true
 		}
 
-		if obs.PID != nil {
-			proc.Status.PID = *obs.PID
-		}
-
-		if obs.StartTime != nil {
-			startTime, err := time.Parse(time.RFC3339, *obs.StartTime)
+		proc.Status.PID = obs.PID
+		if strings.TrimSpace(obs.StartTime) == "" {
+			proc.Status.StartTime = nil
+		} else {
+			startTime, err := time.Parse(time.RFC3339, obs.StartTime)
 			if err != nil {
 				return apierrors.NewBadRequest("invalid startTime")
 			}
@@ -487,6 +527,9 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 				msg = fmt.Sprintf("%s at %s", msg, reportedAt.UTC().Format(time.RFC3339))
 			}
 			g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", msg)
+		}
+		if specWarningChanged && obs.WarningMessage != nil && strings.TrimSpace(*obs.WarningMessage) != "" {
+			g.recorder.Event(&proc, corev1.EventTypeWarning, "SpecWarning", strings.TrimSpace(*obs.WarningMessage))
 		}
 		if processStartedChanged && obs.ProcessStarted != nil && *obs.ProcessStarted {
 			g.recorder.Event(&proc, corev1.EventTypeNormal, "ProcessStarted", "process started")
@@ -718,6 +761,7 @@ func hashDesired(items []DesiredItem) string {
 func reflectDeepEqualStatus(a, b apiv1alpha1.DeviceProcessStatus) bool {
 	return a.Phase == b.Phase &&
 		a.ObservedSpecHash == b.ObservedSpecHash &&
+		a.RuntimeSemantics == b.RuntimeSemantics &&
 		conditionsEqual(a.Conditions, b.Conditions) &&
 		a.ArtifactVersion == b.ArtifactVersion &&
 		a.PID == b.PID &&

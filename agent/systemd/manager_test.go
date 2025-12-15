@@ -2,6 +2,7 @@ package systemd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,5 +120,25 @@ func TestParseTimestampAcceptsRFC3339(t *testing.T) {
 	}
 	if ts.Format(time.RFC3339) != val {
 		t.Fatalf("round trip mismatch: %s vs %s", ts.Format(time.RFC3339), val)
+	}
+}
+
+func TestIsUnitNotFoundErrorMatchesCommonMessages(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{msg: "Unit foo.service could not be found.", want: true},
+		{msg: "Unit foo.service not-found", want: true},
+		{msg: "Loaded: not-found (Reason: No such file or directory)", want: true},
+		{msg: "Unit file foo.service does not exist.", want: true},
+		{msg: "some other error", want: false},
+	}
+
+	for _, tc := range cases {
+		got := IsUnitNotFoundError(errors.New(tc.msg))
+		if got != tc.want {
+			t.Fatalf("IsUnitNotFoundError(%q)=%v, want %v", tc.msg, got, tc.want)
+		}
 	}
 }

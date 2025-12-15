@@ -8,6 +8,8 @@ const (
 	ConditionAgentConnected ConditionType = "AgentConnected"
 	// Spec observation / drift tracking
 	ConditionSpecObserved ConditionType = "SpecObserved"
+	// Spec warnings (e.g., semantic mismatches or deprecated fields)
+	ConditionSpecWarning ConditionType = "SpecWarning"
 	// Artifact lifecycle
 	ConditionArtifactDownloaded ConditionType = "ArtifactDownloaded"
 	// Process lifecycle

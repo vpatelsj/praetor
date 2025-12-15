@@ -47,7 +47,50 @@ func TestRenderUnitFiles(t *testing.T) {
 	}
 
 	expectedEnv := "A=1\nB=2\n"
+	expectedEnv = "A=\"1\"\nB=\"2\"\n"
 	if env != expectedEnv {
 		t.Fatalf("unexpected env content %q, expected %q", env, expectedEnv)
+	}
+}
+
+func TestRenderUnitFilesRejectsControlCharsInWorkingDir(t *testing.T) {
+	item := gateway.DesiredItem{
+		Namespace: "edge-ns",
+		Name:      "processor",
+		Spec: apiv1alpha1.DeviceProcessSpec{
+			Execution: apiv1alpha1.DeviceProcessExecution{
+				Backend:    apiv1alpha1.DeviceProcessBackendSystemd,
+				Command:    []string{"/usr/bin/app"},
+				Args:       []string{"--mode", "fast"},
+				WorkingDir: "/opt/work\nUser=root",
+			},
+			RestartPolicy: apiv1alpha1.DeviceProcessRestartPolicyOnFailure,
+		},
+	}
+
+	_, _, err := renderUnitFiles(item, "/etc/apollo/env/apollo-edge-ns-processor.env")
+	if err == nil {
+		t.Fatalf("expected error for invalid workingDir")
+	}
+}
+
+func TestRenderUnitFilesRejectsControlCharsInUser(t *testing.T) {
+	item := gateway.DesiredItem{
+		Namespace: "edge-ns",
+		Name:      "processor",
+		Spec: apiv1alpha1.DeviceProcessSpec{
+			Execution: apiv1alpha1.DeviceProcessExecution{
+				Backend: apiv1alpha1.DeviceProcessBackendSystemd,
+				Command: []string{"/usr/bin/app"},
+				Args:    []string{"--mode", "fast"},
+				User:    "apollo\troot",
+			},
+			RestartPolicy: apiv1alpha1.DeviceProcessRestartPolicyOnFailure,
+		},
+	}
+
+	_, _, err := renderUnitFiles(item, "/etc/apollo/env/apollo-edge-ns-processor.env")
+	if err == nil {
+		t.Fatalf("expected error for invalid user")
 	}
 }
