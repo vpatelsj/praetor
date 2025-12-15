@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -145,9 +146,12 @@ func TestEnsureOCIRejectsTraversal(t *testing.T) {
 	defer restore()
 
 	f := newOCIFetcher(logr.Discard(), t.TempDir())
-	_, err := f.Ensure(context.Background(), "ghcr.io/example/app@"+digestStr)
+	res, err := f.Ensure(context.Background(), "ghcr.io/example/app@"+digestStr)
 	if err == nil {
 		t.Fatalf("expected traversal error")
+	}
+	if res.verifyReason != "InvalidPath" {
+		t.Fatalf("expected InvalidPath verifyReason, got %q", res.verifyReason)
 	}
 }
 
@@ -220,6 +224,40 @@ func TestEnsureOCIRejectsSymlink(t *testing.T) {
 	}
 	if res.verifyReason != "UnsupportedEntryType" {
 		t.Fatalf("expected UnsupportedEntryType, got %q", res.verifyReason)
+	}
+}
+
+func TestEnsureOCIEntryLimit(t *testing.T) {
+	digestStr := "sha256:" + strings.Repeat("6", 64)
+	origEntries, origBytes := maxExtractEntries, maxExtractBytes
+	maxExtractEntries = 5
+	maxExtractBytes = defaultMaxExtractBytes
+	defer func() {
+		maxExtractEntries = origEntries
+		maxExtractBytes = origBytes
+	}()
+
+	restore := withOCIOverrides(t, func(ctx context.Context, src oras.Target, srcRef string, dst oras.Target, dstRef string, opts oras.CopyOptions) (ocispec.Descriptor, error) {
+		store := dst.(*oci.Store)
+		buf := &bytes.Buffer{}
+		tw := tar.NewWriter(buf)
+		for i := 0; i < maxExtractEntries+1; i++ {
+			name := fmt.Sprintf("bin/app-%d", i)
+			_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: 1, Typeflag: tar.TypeReg})
+			_, _ = tw.Write([]byte("x"))
+		}
+		_ = tw.Close()
+		return pushSingleLayer(store, dstRef, buf.Bytes(), ocispec.MediaTypeImageLayer)
+	})
+	defer restore()
+
+	f := newOCIFetcher(logr.Discard(), t.TempDir())
+	res, err := f.Ensure(context.Background(), "ghcr.io/example/app@"+digestStr)
+	if err == nil {
+		t.Fatalf("expected entry limit error")
+	}
+	if res.verifyReason != "ExtractLimitExceeded" {
+		t.Fatalf("expected ExtractLimitExceeded, got %q", res.verifyReason)
 	}
 }
 

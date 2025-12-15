@@ -26,12 +26,17 @@ import (
 )
 
 const (
-	defaultOCIArtifactRoot = "/var/lib/apollo/artifacts/oci"
-	readyMarkerName        = "READY"
+	defaultOCIArtifactRoot   = "/var/lib/apollo/artifacts/oci"
+	readyMarkerName          = "READY"
+	defaultMaxExtractEntries = 10000
+	defaultMaxExtractBytes   = int64(512 << 20) // 512MiB
 )
 
 var (
 	digestPattern = regexp.MustCompile(`^sha256:[A-Fa-f0-9]{64}$`)
+
+	maxExtractEntries = defaultMaxExtractEntries
+	maxExtractBytes   = defaultMaxExtractBytes
 
 	// Injection points for tests.
 	orasCopy = func(ctx context.Context, src oras.Target, srcRef string, dst oras.Target, dstRef string, opts oras.CopyOptions) (ocispec.Descriptor, error) {
@@ -281,6 +286,7 @@ func extractLayer(r io.Reader, mediaType, dest string) (int64, error) {
 
 	tr := tar.NewReader(reader)
 	var total int64
+	entries := 0
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -288,6 +294,11 @@ func extractLayer(r io.Reader, mediaType, dest string) (int64, error) {
 		}
 		if err != nil {
 			return total, err
+		}
+
+		entries++
+		if entries > maxExtractEntries {
+			return total, extractError{reason: "ExtractLimitExceeded", msg: fmt.Sprintf("extraction aborted: too many entries (%d > %d)", entries, maxExtractEntries)}
 		}
 
 		name := filepath.Clean(hdr.Name)
@@ -319,6 +330,9 @@ func extractLayer(r io.Reader, mediaType, dest string) (int64, error) {
 			n, err := io.Copy(f, tr)
 			f.Close()
 			total += n
+			if total > maxExtractBytes {
+				return total, extractError{reason: "ExtractLimitExceeded", msg: fmt.Sprintf("extraction aborted: size %d exceeds limit %d", total, maxExtractBytes)}
+			}
 			if err != nil {
 				return total, err
 			}
