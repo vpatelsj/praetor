@@ -114,26 +114,56 @@ func RemoveUnitWithDetails(ctx context.Context, unitName, unitPath string, envPa
 
 // EnableAndStart enables the unit and starts it.
 func EnableAndStart(ctx context.Context, unitName string) error {
-	_, err := runSystemctl(ctx, "enable", "--now", unitName)
-	return err
+	out, err := runSystemctl(ctx, "enable", "--now", unitName)
+	if err != nil {
+		return fmt.Errorf("systemctl enable --now %s: %w: %s", unitName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// Start starts the unit (without enabling it).
+func Start(ctx context.Context, unitName string) error {
+	out, err := runSystemctl(ctx, "start", unitName)
+	if err != nil {
+		return fmt.Errorf("systemctl start %s: %w: %s", unitName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // Restart restarts the unit.
 func Restart(ctx context.Context, unitName string) error {
-	_, err := runSystemctl(ctx, "restart", unitName)
-	return err
+	out, err := runSystemctl(ctx, "restart", unitName)
+	if err != nil {
+		return fmt.Errorf("systemctl restart %s: %w: %s", unitName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // StopAndDisable stops the unit and disables it.
 func StopAndDisable(ctx context.Context, unitName string) error {
-	_, err := runSystemctl(ctx, "disable", "--now", unitName)
-	return err
+	out, err := runSystemctl(ctx, "disable", "--now", unitName)
+	if err != nil {
+		return fmt.Errorf("systemctl disable --now %s: %w: %s", unitName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // DaemonReload reloads systemd units.
 func DaemonReload(ctx context.Context) error {
-	_, err := runSystemctl(ctx, "daemon-reload")
-	return err
+	out, err := runSystemctl(ctx, "daemon-reload")
+	if err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// IsUnitNotFoundError returns true when a systemctl operation failed because the unit does not exist.
+func IsUnitNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "could not be found") || strings.Contains(s, "not-found") || strings.Contains(s, "loaded: not-found")
 }
 
 // Show returns runtime info for a unit.

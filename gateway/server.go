@@ -71,6 +71,7 @@ type Observation struct {
 	Healthy          *bool   `json:"healthy,omitempty"`
 	PID              *int64  `json:"pid,omitempty"`
 	StartTime        *string `json:"startTime,omitempty"`
+	ErrorMessage     *string `json:"errorMessage,omitempty"`
 }
 
 // ReportResponse acknowledges a report.
@@ -436,7 +437,11 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 					proc.Status.Phase = apiv1alpha1.DeviceProcessPhaseRunning
 				}
 			} else {
-				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessNotStarted", "process not started")
+				if obs.ErrorMessage != nil && strings.TrimSpace(*obs.ErrorMessage) != "" {
+					conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ReconcileError", strings.TrimSpace(*obs.ErrorMessage))
+				} else {
+					conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionProcessStarted, "ProcessNotStarted", "process not started")
+				}
 			}
 			processStartedChanged = true
 		}
@@ -459,12 +464,16 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 		}
 
 		if obs.StartTime != nil {
-			startTime, err := time.Parse(time.RFC3339, *obs.StartTime)
-			if err != nil {
-				return apierrors.NewBadRequest("invalid startTime")
+			if strings.TrimSpace(*obs.StartTime) == "" {
+				proc.Status.StartTime = nil
+			} else {
+				startTime, err := time.Parse(time.RFC3339, *obs.StartTime)
+				if err != nil {
+					return apierrors.NewBadRequest("invalid startTime")
+				}
+				t := metav1.NewTime(startTime)
+				proc.Status.StartTime = &t
 			}
-			t := metav1.NewTime(startTime)
-			proc.Status.StartTime = &t
 		}
 
 		if reflectDeepEqualStatus(before.Status, proc.Status) {

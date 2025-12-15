@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +34,10 @@ const (
 )
 
 type managedItem struct {
-	UnitName string `json:"unitName"`
+	UnitName              string `json:"unitName"`
+	LastActionAt          string `json:"lastActionAt,omitempty"`
+	LastActionSpecHash    string `json:"lastActionSpecHash,omitempty"`
+	LastActionDescription string `json:"lastActionDescription,omitempty"`
 }
 
 type agentState struct {
@@ -235,10 +236,14 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 	for i := range desired.Items {
 		item := desired.Items[i]
 		key := itemKey(item.Namespace, item.Name)
+		zeroPID := int64(0)
+		empty := ""
 		observation := gateway.Observation{
 			Namespace:        item.Namespace,
 			Name:             item.Name,
 			ObservedSpecHash: item.SpecHash,
+			PID:              &zeroPID,
+			StartTime:        &empty,
 		}
 
 		if item.Spec.Execution.Backend != apiv1alpha1.DeviceProcessBackendSystemd {
@@ -255,8 +260,10 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.Error(err, "render unit", "namespace", item.Namespace, "name", item.Name)
 			observation.ProcessStarted = boolPtr(false)
 			observation.Healthy = boolPtr(false)
+			observation.ErrorMessage = stringPtr(err.Error())
+			_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
 			obs = append(obs, observation)
-			managedNow[key] = managedItem{UnitName: paths.UnitName}
+			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
 			continue
 		}
 
@@ -265,8 +272,10 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.Error(err, "ensure unit", "namespace", item.Namespace, "name", item.Name)
 			observation.ProcessStarted = boolPtr(false)
 			observation.Healthy = boolPtr(false)
+			observation.ErrorMessage = stringPtr(err.Error())
+			_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
 			obs = append(obs, observation)
-			managedNow[key] = managedItem{UnitName: paths.UnitName}
+			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
 			continue
 		}
 
@@ -276,14 +285,33 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			}
 		}
 
-		if _, ok := a.managed[key]; !ok {
+		prevManaged, hadPrev := a.managed[key]
+		currentManaged := carryManaged(prevManaged, paths.UnitName)
+
+		if !hadPrev {
 			if err := systemd.EnableAndStart(ctx, paths.UnitName); err != nil {
 				a.logger.Error(err, "enable/start failed", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
+				observation.ProcessStarted = boolPtr(false)
+				observation.Healthy = boolPtr(false)
+				observation.ErrorMessage = stringPtr(err.Error())
+				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
+				obs = append(obs, observation)
+				managedNow[key] = currentManaged
+				continue
 			}
+			currentManaged = markAction(currentManaged, item.SpecHash, "enable-and-start")
 		} else if unitChanged || envChanged {
 			if err := systemd.Restart(ctx, paths.UnitName); err != nil {
 				a.logger.Error(err, "restart failed", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
+				observation.ProcessStarted = boolPtr(false)
+				observation.Healthy = boolPtr(false)
+				observation.ErrorMessage = stringPtr(err.Error())
+				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
+				obs = append(obs, observation)
+				managedNow[key] = currentManaged
+				continue
 			}
+			currentManaged = markAction(currentManaged, item.SpecHash, "restart")
 		}
 
 		pid, startTime, activeState, subState, err := systemd.Show(ctx, paths.UnitName)
@@ -291,23 +319,51 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.Error(err, "show failed", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
 			observation.ProcessStarted = boolPtr(false)
 			observation.Healthy = boolPtr(false)
+			observation.ErrorMessage = stringPtr(err.Error())
 		} else {
+			// Drift correction: desired items are expected to be running.
+			shouldRun := true
+			needStart := shouldRun && (activeState != "active" || pid == 0)
+			if needStart && shouldAttemptAction(currentManaged, item.SpecHash, 5*time.Second) {
+				var actionErr error
+				if activeState == "active" && pid == 0 {
+					actionErr = systemd.Restart(ctx, paths.UnitName)
+					currentManaged = markAction(currentManaged, item.SpecHash, "restart-drift")
+				} else {
+					actionErr = systemd.Start(ctx, paths.UnitName)
+					currentManaged = markAction(currentManaged, item.SpecHash, "start-drift")
+				}
+				if actionErr != nil {
+					a.logger.Error(actionErr, "drift correction failed", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
+					observation.ProcessStarted = boolPtr(false)
+					observation.Healthy = boolPtr(false)
+					observation.ErrorMessage = stringPtr(actionErr.Error())
+					_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
+				} else {
+					pid, startTime, activeState, subState, err = systemd.Show(ctx, paths.UnitName)
+					if err != nil {
+						a.logger.Error(err, "show after drift correction failed", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
+						observation.ErrorMessage = stringPtr(err.Error())
+					}
+				}
+			}
+
 			started := pid > 0 && (activeState == "active" || activeState == "activating" || activeState == "reloading")
 			observation.ProcessStarted = boolPtr(started)
 			observation.Healthy = boolPtr(started)
-			if pid > 0 {
-				observation.PID = &pid
-			}
+			observation.PID = int64Ptr(pid)
 			if !startTime.IsZero() {
 				ts := startTime.UTC().Format(time.RFC3339)
 				observation.StartTime = &ts
+			} else {
+				observation.StartTime = stringPtr("")
 			}
 
 			a.logger.V(1).Info("unit status", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName, "active", activeState, "sub", subState, "pid", pid, "start", startTime)
 		}
 
 		obs = append(obs, observation)
-		managedNow[key] = managedItem{UnitName: paths.UnitName}
+		managedNow[key] = currentManaged
 	}
 
 	for key, managed := range a.managed {
@@ -322,7 +378,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 		}
 
 		paths := systemd.PathsFor(ns, name)
-		if err := systemd.StopAndDisable(ctx, managed.UnitName); err != nil {
+		if err := stopAndDisableQuiet(ctx, a.logger, managed.UnitName); err != nil {
 			a.logger.Error(err, "stop/disable failed", "unit", managed.UnitName, "namespace", ns, "name", name)
 		}
 
@@ -353,9 +409,14 @@ func renderUnitFiles(item gateway.DesiredItem, envPath string) (string, string, 
 		return "", "", fmt.Errorf("missing command")
 	}
 
+	execStart, err := renderExecStart(item.Spec.Execution.Command, item.Spec.Execution.Args)
+	if err != nil {
+		return "", "", err
+	}
+
 	unit := &strings.Builder{}
 	fmt.Fprintf(unit, "[Unit]\nDescription=Apollo DeviceProcess %s/%s\nAfter=network.target\n\n", item.Namespace, item.Name)
-	fmt.Fprintf(unit, "[Service]\nType=simple\nExecStart=%s\n", renderExecStart(item.Spec.Execution.Command, item.Spec.Execution.Args))
+	fmt.Fprintf(unit, "[Service]\nType=simple\nExecStart=%s\n", execStart)
 	if wd := strings.TrimSpace(item.Spec.Execution.WorkingDir); wd != "" {
 		fmt.Fprintf(unit, "WorkingDirectory=%s\n", wd)
 	}
@@ -366,27 +427,39 @@ func renderUnitFiles(item gateway.DesiredItem, envPath string) (string, string, 
 	}
 	unit.WriteString("\n[Install]\nWantedBy=multi-user.target\n")
 
-	envContent := renderEnvFile(item.Spec.Execution.Env)
+	envContent, err := RenderEnvFile(item.Spec.Execution.Env)
+	if err != nil {
+		return "", "", err
+	}
 	return unit.String(), envContent, nil
 }
 
-func renderExecStart(cmd []string, args []string) string {
+func renderExecStart(cmd []string, args []string) (string, error) {
 	parts := append(append([]string{}, cmd...), args...)
 	escaped := make([]string, 0, len(parts))
 	for _, p := range parts {
-		escaped = append(escaped, escapeSystemdArg(p))
+		q, err := escapeSystemdArg(p)
+		if err != nil {
+			return "", err
+		}
+		escaped = append(escaped, q)
 	}
-	return strings.Join(escaped, " ")
+	return strings.Join(escaped, " "), nil
 }
 
-func escapeSystemdArg(arg string) string {
+func escapeSystemdArg(arg string) (string, error) {
 	if arg == "" {
-		return "\"\""
+		return "\"\"", nil
+	}
+	if strings.ContainsAny(arg, "\n\r") {
+		return "", fmt.Errorf("invalid ExecStart arg: contains newline")
 	}
 	if strings.ContainsAny(arg, " \"\\\t") {
-		return strconv.Quote(arg)
+		escaped := strings.ReplaceAll(arg, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		return "\"" + escaped + "\"", nil
 	}
-	return arg
+	return arg, nil
 }
 
 func renderRestartPolicy(policy apiv1alpha1.DeviceProcessRestartPolicy) string {
@@ -400,22 +473,42 @@ func renderRestartPolicy(policy apiv1alpha1.DeviceProcessRestartPolicy) string {
 	}
 }
 
-func renderEnvFile(vars []apiv1alpha1.DeviceProcessEnvVar) string {
-	if len(vars) == 0 {
-		return ""
-	}
-	items := make([]apiv1alpha1.DeviceProcessEnvVar, len(vars))
-	copy(items, vars)
-	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+func carryManaged(prev managedItem, unitName string) managedItem {
+	prev.UnitName = unitName
+	return prev
+}
 
-	b := &strings.Builder{}
-	for _, v := range items {
-		b.WriteString(v.Name)
-		b.WriteByte('=')
-		b.WriteString(v.Value)
-		b.WriteByte('\n')
+func markAction(mi managedItem, specHash, desc string) managedItem {
+	mi.LastActionAt = time.Now().UTC().Format(time.RFC3339)
+	mi.LastActionSpecHash = specHash
+	mi.LastActionDescription = desc
+	return mi
+}
+
+func shouldAttemptAction(mi managedItem, specHash string, minInterval time.Duration) bool {
+	if strings.TrimSpace(mi.LastActionAt) == "" {
+		return true
 	}
-	return b.String()
+	if mi.LastActionSpecHash != "" && mi.LastActionSpecHash != specHash {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, mi.LastActionAt)
+	if err != nil {
+		return true
+	}
+	return time.Since(last) >= minInterval
+}
+
+func stopAndDisableQuiet(ctx context.Context, logger logr.Logger, unitName string) error {
+	err := systemd.StopAndDisable(ctx, unitName)
+	if err == nil {
+		return nil
+	}
+	if systemd.IsUnitNotFoundError(err) {
+		logger.V(1).Info("unit not found during stop/disable", "unit", unitName)
+		return nil
+	}
+	return err
 }
 
 func (a *agent) persistState() error {
@@ -532,6 +625,14 @@ func (a *agent) sendReport(ctx context.Context, observations []gateway.Observati
 }
 
 func boolPtr(v bool) *bool {
+	return &v
+}
+
+func stringPtr(v string) *string {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
 	return &v
 }
 

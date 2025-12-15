@@ -47,6 +47,7 @@ func TestRenderUnitFiles(t *testing.T) {
 	}
 
 	expectedEnv := "A=1\nB=2\n"
+	expectedEnv = "A=\"1\"\nB=\"2\"\n"
 	if env != expectedEnv {
 		t.Fatalf("unexpected env content %q, expected %q", env, expectedEnv)
 	}
