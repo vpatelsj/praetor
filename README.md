@@ -1,7 +1,7 @@
 Praetor
 ====================
 
-Control plane for managing processes on devices (network switches, BMCs, DPUs) without kubelets on the devices. A controller fans out `DeviceProcessDeployment` into per-device `DeviceProcess` objects; a gateway mediates all device traffic, and lightweight agents on the devices fetch desired state and report status over HTTP. The gateway can run in- or out-of-cluster, aggregates device status, and shields the apiserver from high fan-out.
+Control plane for managing processes on devices (network switches, BMCs, DPUs) without kubelets on the devices. A controller fans out `DeviceProcessDeployment` into per-device `DeviceProcess` objects; a gateway mediates all device traffic, and lightweight agents on the devices fetch desired state and report status over HTTP. Agents support a systemd backend that pulls digest-pinned OCI artifacts (single-layer tars), extracts them on the device, and renders/starts systemd units from the payload. The gateway can run in- or out-of-cluster, aggregates device status, and shields the apiserver from high fan-out.
 
 
 
@@ -9,12 +9,13 @@ Control plane for managing processes on devices (network switches, BMCs, DPUs) w
 Quick Start
 -----------
 
-Spin up a kind cluster, installs CRDs and controllers, applies the demo DeviceProcessDeployment that fans out two DeviceProcess objects for the demo NetworkSwitches, and then starts the device agents that update deployment status via the gateway.
+Spin up a kind cluster, builds/pushes a single-layer OCI payload to a local plain-HTTP registry, applies the demo DeviceProcessDeployment with a digest reference (rewritten to `host.docker.internal:5000` so agents can pull), and starts systemd-based agents that reconcile and report status via the gateway.
 
 ```
-make demo-up
-make install-crs
-make start-device-agents
+make clean-all           # optional: remove prior cluster/agents
+make demo-up             # rebuild images, load into kind, build/push payload, write digest to /tmp/log-forwarder.digest
+make install-crs         # install CRDs/controller/gateway, port-forward, apply demo using the saved digest and host.docker.internal:5000
+make start-device-agents # systemd-in-container agents with plain-HTTP allowlist baked in
 
 watch make monitor
 ```
