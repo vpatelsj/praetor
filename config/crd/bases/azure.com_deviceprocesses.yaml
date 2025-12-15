@@ -202,7 +202,14 @@ spec:
                 type: object
               restartPolicy:
                 default: Always
-                description: RestartPolicy controls restart behavior.
+                description: |-
+                  RestartPolicy controls the backend restart mode (systemd Restart=).
+
+
+                  DaemonSet semantics: while this DeviceProcess resource exists, the device agent will
+                  continuously reconcile the local runtime to Running (it may start the service again
+                  even when RestartPolicy is Never). This field only controls systemd's restart behavior
+                  after the service exits.
                 enum:
                 - Always
                 - OnFailure
@@ -319,6 +326,11 @@ spec:
                 description: RestartCount is the number of times the process has restarted.
                 format: int32
                 type: integer
+              runtimeSemantics:
+                description: |-
+                  RuntimeSemantics describes the runtime reconciliation model enforced by the agent.
+                  Currently this is always "DaemonSet" (resource present => keep running).
+                type: string
               startTime:
                 description: StartTime is when the process started.
                 format: date-time

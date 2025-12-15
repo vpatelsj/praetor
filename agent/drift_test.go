@@ -57,7 +57,8 @@ func TestReconcileStartsStoppedService(t *testing.T) {
 				Command: []string{"/usr/bin/app"},
 				Args:    []string{"--flag"},
 			},
-			Artifact: apiv1alpha1.DeviceProcessArtifact{Type: apiv1alpha1.ArtifactTypeFile, URL: "/usr/bin/app"},
+			Artifact:      apiv1alpha1.DeviceProcessArtifact{Type: apiv1alpha1.ArtifactTypeFile, URL: "/usr/bin/app"},
+			RestartPolicy: apiv1alpha1.DeviceProcessRestartPolicyNever,
 		},
 	}
 
@@ -65,6 +66,9 @@ func TestReconcileStartsStoppedService(t *testing.T) {
 	unitContent, envContent, err := renderUnitFiles(item, paths.EnvPath)
 	if err != nil {
 		t.Fatalf("renderUnitFiles: %v", err)
+	}
+	if !strings.Contains(unitContent, "Restart=no\n") {
+		t.Fatalf("expected unit to render Restart=no, got:\n%s", unitContent)
 	}
 	if err := os.MkdirAll(filepath.Dir(paths.UnitPath), 0o755); err != nil {
 		t.Fatalf("mkdir unit dir: %v", err)

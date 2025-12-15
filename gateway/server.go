@@ -69,10 +69,13 @@ type Observation struct {
 	ObservedSpecHash string  `json:"observedSpecHash"`
 	ProcessStarted   *bool   `json:"processStarted,omitempty"`
 	Healthy          *bool   `json:"healthy,omitempty"`
-	PID              *int64  `json:"pid,omitempty"`
-	StartTime        *string `json:"startTime,omitempty"`
+	PID              int64   `json:"pid"`
+	StartTime        string  `json:"startTime"`
 	ErrorMessage     *string `json:"errorMessage,omitempty"`
+	WarningMessage   *string `json:"warningMessage,omitempty"`
 }
+
+const runtimeSemanticsDaemonSet = "DaemonSet"
 
 // ReportResponse acknowledges a report.
 type ReportResponse struct {
@@ -417,6 +420,9 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			proc.Status.Phase = apiv1alpha1.DeviceProcessPhasePending
 		}
 
+		// DeviceProcess resources have DaemonSet semantics: resource present => agent enforces Running.
+		proc.Status.RuntimeSemantics = runtimeSemanticsDaemonSet
+
 		connectedChanged := setAgentConnected(&proc.Status, true, connectedReason, connectedMessage)
 		specObservedChanged := false
 		if obs.ObservedSpecHash != "" && proc.Status.ObservedSpecHash != obs.ObservedSpecHash {
@@ -446,6 +452,15 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			processStartedChanged = true
 		}
 
+		specWarningChanged := false
+		if obs.WarningMessage != nil && strings.TrimSpace(*obs.WarningMessage) != "" {
+			msg := strings.TrimSpace(*obs.WarningMessage)
+			if existing := conditions.FindCondition(proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning); existing == nil || existing.Status != metav1.ConditionTrue || existing.Message != msg {
+				specWarningChanged = true
+			}
+			conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionSpecWarning, "SpecWarning", msg)
+		}
+
 		healthChanged := false
 		if obs.Healthy != nil {
 			if *obs.Healthy {
@@ -459,21 +474,16 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			healthChanged = true
 		}
 
-		if obs.PID != nil {
-			proc.Status.PID = *obs.PID
-		}
-
-		if obs.StartTime != nil {
-			if strings.TrimSpace(*obs.StartTime) == "" {
-				proc.Status.StartTime = nil
-			} else {
-				startTime, err := time.Parse(time.RFC3339, *obs.StartTime)
-				if err != nil {
-					return apierrors.NewBadRequest("invalid startTime")
-				}
-				t := metav1.NewTime(startTime)
-				proc.Status.StartTime = &t
+		proc.Status.PID = obs.PID
+		if strings.TrimSpace(obs.StartTime) == "" {
+			proc.Status.StartTime = nil
+		} else {
+			startTime, err := time.Parse(time.RFC3339, obs.StartTime)
+			if err != nil {
+				return apierrors.NewBadRequest("invalid startTime")
 			}
+			t := metav1.NewTime(startTime)
+			proc.Status.StartTime = &t
 		}
 
 		if reflectDeepEqualStatus(before.Status, proc.Status) {
@@ -496,6 +506,9 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 				msg = fmt.Sprintf("%s at %s", msg, reportedAt.UTC().Format(time.RFC3339))
 			}
 			g.recorder.Event(&proc, corev1.EventTypeNormal, "SpecObserved", msg)
+		}
+		if specWarningChanged && obs.WarningMessage != nil && strings.TrimSpace(*obs.WarningMessage) != "" {
+			g.recorder.Event(&proc, corev1.EventTypeWarning, "SpecWarning", strings.TrimSpace(*obs.WarningMessage))
 		}
 		if processStartedChanged && obs.ProcessStarted != nil && *obs.ProcessStarted {
 			g.recorder.Event(&proc, corev1.EventTypeNormal, "ProcessStarted", "process started")
@@ -727,6 +740,7 @@ func hashDesired(items []DesiredItem) string {
 func reflectDeepEqualStatus(a, b apiv1alpha1.DeviceProcessStatus) bool {
 	return a.Phase == b.Phase &&
 		a.ObservedSpecHash == b.ObservedSpecHash &&
+		a.RuntimeSemantics == b.RuntimeSemantics &&
 		conditionsEqual(a.Conditions, b.Conditions) &&
 		a.ArtifactVersion == b.ArtifactVersion &&
 		a.PID == b.PID &&

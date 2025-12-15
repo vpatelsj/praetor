@@ -134,7 +134,12 @@ type DeviceProcessSpec struct {
 	Artifact DeviceProcessArtifact `json:"artifact"`
 	// Execution describes how to execute the artifact.
 	Execution DeviceProcessExecution `json:"execution"`
-	// RestartPolicy controls restart behavior.
+	// RestartPolicy controls the backend restart mode (systemd Restart=).
+	//
+	// DaemonSet semantics: while this DeviceProcess resource exists, the device agent will
+	// continuously reconcile the local runtime to Running (it may start the service again
+	// even when RestartPolicy is Never). This field only controls systemd's restart behavior
+	// after the service exits.
 	// +kubebuilder:default=Always
 	RestartPolicy DeviceProcessRestartPolicy `json:"restartPolicy,omitempty"`
 	// HealthCheck configures optional periodic health probes.
@@ -161,6 +166,9 @@ type DeviceProcessStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// ObservedSpecHash tracks the last spec hash reported by the device agent.
 	ObservedSpecHash string `json:"observedSpecHash,omitempty"`
+	// RuntimeSemantics describes the runtime reconciliation model enforced by the agent.
+	// Currently this is always "DaemonSet" (resource present => keep running).
+	RuntimeSemantics string `json:"runtimeSemantics,omitempty"`
 	// ArtifactVersion is the resolved artifact version (tag or digest).
 	ArtifactVersion string `json:"artifactVersion,omitempty"`
 	// PID is the process identifier on the target device.

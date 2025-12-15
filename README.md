@@ -42,6 +42,12 @@ Conditions and readiness
 - DeviceProcess conditions: `AgentConnected`, `SpecObserved`, `ProcessStarted`, `Healthy` (plus phase Pending/Running/...)
 - Deployment conditions: `Available`, `Progressing`; rollout counts include desired/current/updated/ready/available.
 
+DeviceProcess semantics
+----------------------
+- DaemonSet semantics: while a `DeviceProcess` resource exists for a device, the agent continuously reconciles the local runtime to **Running**.
+- `spec.restartPolicy` controls the backend restart mode only (systemd `Restart=`), not the desired state. Even with `restartPolicy: Never` (`Restart=no`), the agent will start the service again if it is stopped while the resource exists.
+- Deleting the resource stops/disables the unit and removes unit/env artifacts.
+
 HTTP surface
 ------------
 - `GET /v1/devices/{device}/desired` – desired state, supports `ETag`/`304 Not Modified`.

@@ -31,6 +31,7 @@ const (
 	defaultHeartbeatSeconds = 15
 	maxBackoff              = 30 * time.Second
 	defaultStatePath        = "/var/lib/apollo/agent/state.json"
+	runtimeSemantics        = "DaemonSet"
 )
 
 type managedItem struct {
@@ -236,14 +237,18 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 	for i := range desired.Items {
 		item := desired.Items[i]
 		key := itemKey(item.Namespace, item.Name)
-		zeroPID := int64(0)
-		empty := ""
 		observation := gateway.Observation{
 			Namespace:        item.Namespace,
 			Name:             item.Name,
 			ObservedSpecHash: item.SpecHash,
-			PID:              &zeroPID,
-			StartTime:        &empty,
+			PID:              0,
+			StartTime:        "",
+		}
+
+		if item.Spec.RestartPolicy == apiv1alpha1.DeviceProcessRestartPolicyNever {
+			msg := "DaemonSet semantics: agent will start service when stopped even if Restart=no; RestartPolicy affects systemd only."
+			a.logger.Info("restartPolicy=Never does not disable runtime reconciliation", "namespace", item.Namespace, "name", item.Name, "unit", systemd.PathsFor(item.Namespace, item.Name).UnitName)
+			observation.WarningMessage = stringPtr(msg)
 		}
 
 		if item.Spec.Execution.Backend != apiv1alpha1.DeviceProcessBackendSystemd {
@@ -321,9 +326,9 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.Healthy = boolPtr(false)
 			observation.ErrorMessage = stringPtr(err.Error())
 		} else {
-			// Drift correction: desired items are expected to be running.
-			shouldRun := true
-			needStart := shouldRun && (activeState != "active" || pid == 0)
+			// DaemonSet semantics: resource present => keep running.
+			desiredRunning := true
+			needStart := desiredRunning && (activeState != "active" || pid == 0)
 			if needStart && shouldAttemptAction(currentManaged, item.SpecHash, 5*time.Second) {
 				var actionErr error
 				if activeState == "active" && pid == 0 {
@@ -351,12 +356,12 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			started := pid > 0 && (activeState == "active" || activeState == "activating" || activeState == "reloading")
 			observation.ProcessStarted = boolPtr(started)
 			observation.Healthy = boolPtr(started)
-			observation.PID = int64Ptr(pid)
+			observation.PID = pid
 			if !startTime.IsZero() {
 				ts := startTime.UTC().Format(time.RFC3339)
-				observation.StartTime = &ts
+				observation.StartTime = ts
 			} else {
-				observation.StartTime = stringPtr("")
+				observation.StartTime = ""
 			}
 
 			a.logger.V(1).Info("unit status", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName, "active", activeState, "sub", subState, "pid", pid, "start", startTime)
@@ -421,7 +426,8 @@ func renderUnitFiles(item gateway.DesiredItem, envPath string) (string, string, 
 		fmt.Fprintf(unit, "WorkingDirectory=%s\n", wd)
 	}
 	fmt.Fprintf(unit, "EnvironmentFile=-%s\n", envPath)
-	fmt.Fprintf(unit, "Restart=%s\n", renderRestartPolicy(item.Spec.RestartPolicy))
+	systemdRestartMode := renderSystemdRestartMode(item.Spec.RestartPolicy)
+	fmt.Fprintf(unit, "Restart=%s\n", systemdRestartMode)
 	if user := strings.TrimSpace(item.Spec.Execution.User); user != "" {
 		fmt.Fprintf(unit, "User=%s\n", user)
 	}
@@ -462,7 +468,7 @@ func escapeSystemdArg(arg string) (string, error) {
 	return arg, nil
 }
 
-func renderRestartPolicy(policy apiv1alpha1.DeviceProcessRestartPolicy) string {
+func renderSystemdRestartMode(policy apiv1alpha1.DeviceProcessRestartPolicy) string {
 	switch policy {
 	case apiv1alpha1.DeviceProcessRestartPolicyNever:
 		return "no"
@@ -629,10 +635,6 @@ func boolPtr(v bool) *bool {
 }
 
 func stringPtr(v string) *string {
-	return &v
-}
-
-func int64Ptr(v int64) *int64 {
 	return &v
 }
 
