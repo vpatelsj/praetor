@@ -12,6 +12,19 @@ AGENT_GATEWAY ?= http://$(DOCKER_BRIDGE_IP):$(FORWARD_PORT)
 AGENT_NAMES ?= device-01 device-02
 DOCKER_GO_IMAGE ?= golang:1.22-alpine
 DOCKER_GO_RUN = docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_GO_IMAGE)
+DOCKER_CACHE_DIR ?= .docker-cache
+DOCKER_CACHE_FROM := $(shell test -d $(DOCKER_CACHE_DIR) && echo --cache-from type=local,src=$(DOCKER_CACHE_DIR))
+BUILDX_AVAILABLE := $(shell docker buildx version >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(BUILDX_AVAILABLE),1)
+DOCKER_BUILD_CMD ?= DOCKER_BUILDKIT=1 docker buildx build
+DOCKER_BUILD_LOAD ?= --load
+DOCKER_CACHE_TO ?=
+else
+DOCKER_BUILD_CMD ?= DOCKER_BUILDKIT=1 docker build
+DOCKER_BUILD_LOAD ?=
+DOCKER_CACHE_TO ?=
+endif
+DOCKER_BUILD_OPTS ?= --build-arg BUILDKIT_INLINE_CACHE=1 $(DOCKER_BUILD_LOAD) $(DOCKER_CACHE_FROM) $(DOCKER_CACHE_TO)
 KIND_INSTALL_CMD ?= brew install kind
 DEMO_BUILD_TARGET ?= demo-build
 
@@ -55,9 +68,9 @@ build:
 
 # Generate, build, image, and load into kind (controller, gateway, agent images)
 demo-build: ensure-kind tools generate manifests build
-	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
-	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
-	docker build -t apollo/agent:dev -f Dockerfile.agent .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/gateway:dev -f Dockerfile.gateway .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/agent:dev -f Dockerfile.agent .
 	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
@@ -70,9 +83,9 @@ container-build:
 
 # Full demo build using containerized Go for codegen/build, then local docker/kind for images.
 container-demo-build: ensure-kind container-build
-	docker build -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
-	docker build -t apollo/gateway:dev -f Dockerfile.gateway .
-	docker build -t apollo/agent:dev -f Dockerfile.agent .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/controller:dev -t apollo-deviceprocess-controller:dev -f Dockerfile.controller .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/gateway:dev -f Dockerfile.gateway .
+	$(DOCKER_BUILD_CMD) $(DOCKER_BUILD_OPTS) -t apollo/agent:dev -f Dockerfile.agent .
 	kind load docker-image apollo/controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo-deviceprocess-controller:dev --name $(KIND_CLUSTER)
 	kind load docker-image apollo/gateway:dev --name $(KIND_CLUSTER)
