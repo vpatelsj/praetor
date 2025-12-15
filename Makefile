@@ -6,9 +6,8 @@ IMAGE ?= apollo-deviceprocess-controller:dev
 KIND_CLUSTER ?= apollo-dev
 KIND_IMAGE ?= kindest/node:v1.29.4
 NAMESPACE ?= default
-DOCKER_BRIDGE_IP ?= $(shell docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
 FORWARD_PORT ?= 18080
-AGENT_GATEWAY ?= http://$(DOCKER_BRIDGE_IP):$(FORWARD_PORT)
+AGENT_GATEWAY ?= http://host.docker.internal:$(FORWARD_PORT)
 AGENT_NAMES ?= device-01 device-02
 DOCKER_GO_IMAGE ?= golang:1.22-alpine
 DOCKER_GO_RUN = docker run --rm -v $(PWD):/workspace -w /workspace $(DOCKER_GO_IMAGE)
@@ -145,7 +144,6 @@ kind-clean:
 
 # Step 9: start systemd-capable agent containers pointing at the host gateway port-forward.
 start-device-agents:
-	@[ -n "$(DOCKER_BRIDGE_IP)" ] || (echo "docker bridge IP not found; ensure docker is running" && exit 1)
 	@echo "Using agent gateway: $(AGENT_GATEWAY)"
 	for dev in $(AGENT_NAMES); do \
 		docker rm -f $$dev 2>/dev/null || true; \
@@ -155,6 +153,8 @@ start-device-agents:
 		  -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 		  -e APOLLO_GATEWAY_URL=$(AGENT_GATEWAY) \
 		  -e APOLLO_DEVICE_NAME=$$dev \
+		  --add-host host.docker.internal:host-gateway \
+		  --stop-signal SIGRTMIN+3 \
 		  apollo/agent:dev; \
 	done
 
@@ -165,3 +165,12 @@ stop-device-agents:
 # Remove local build artifacts
 clean:
 	rm -rf bin
+
+# Clean everything: stop agents, delete kind cluster, remove binaries and images
+clean-all:
+	@echo "Cleaning everything..."
+	$(MAKE) stop-device-agents
+	kind delete cluster --name $(KIND_CLUSTER) || true
+	rm -rf bin
+	docker rmi apollo/agent:dev apollo/gateway:dev apollo/controller:dev apollo-deviceprocess-controller:dev 2>/dev/null || true
+	@echo "Cleanup complete"

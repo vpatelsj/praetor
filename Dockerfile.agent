@@ -1,7 +1,7 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /workspace
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /agent ./agent
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /agent ./agent
 
 FROM jrei/systemd-debian:12
 ENV container docker
