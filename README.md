@@ -11,18 +11,9 @@ Quick Start
 
 Spin up a kind cluster, installs CRDs and controllers, applies the demo DeviceProcessDeployment that fans out two DeviceProcess objects for the demo NetworkSwitches, and then starts the device agents that update deployment status via the gateway.
 
-Terminal 1 (cluster + controller/gateway):
 ```
 make demo-up
-```
-----
-Terminal 2 (apply demo CRs + port-forward gateway in background):
-```
 make install-crs
-```
----
-Terminal 3 (run demo agents):
-```
 make start-device-agents
 
 watch make monitor
