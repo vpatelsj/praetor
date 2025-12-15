@@ -19,6 +19,14 @@ make start-device-agents
 watch make monitor
 ```
 
+Local demo (plain HTTP registry)
+--------------------------------
+- Build a single-layer payload tarball (e.g., `tar -C payload -cf payload.tar .`) with binaries/config under `payload/`.
+- Push it to your local registry with a digest tag, e.g., `oras push localhost:5000/log-forwarder:demo payload.tar:application/vnd.oci.image.layer.v1.tar` then note the digest.
+- Allow plain HTTP for local registries: export `APOLLO_OCI_PLAIN_HTTP=1` or `APOLLO_OCI_PLAIN_HTTP_HOSTS=localhost,127.0.0.1,kind-registry` for agents.
+- Update `config/samples/*deviceprocess*.yaml` to reference the digest (`ref@sha256:...`) and use relative commands (e.g., `payload/bin/log-forwarder`).
+- Apply the CRs, start the gateway/agent binaries, and watch status via `make monitor`.
+
 
 
 ![Demo walkthrough](images/demo2.gif)
@@ -60,6 +68,9 @@ Operational notes
 - Stale detection: `stale-multiplier × heartbeat` (default 3×15s) marks agents disconnected.
 - Heavy use of ETag means most desired polls return 304; 200 only when spec changes or ETag is missing.
 - Field index on `spec.deviceRef.name` avoids cluster-wide list scans when serving desired.
+- OCI artifacts must be digest-pinned; commands/args/workingDir are resolved relative to the extracted rootfs (no leading `/`).
+- Artifact extraction is atomic (temp dir → rename) and only marked READY after successful verify/extraction.
+- Plain-HTTP registries are blocked by default; opt-in with `APOLLO_OCI_PLAIN_HTTP=1` or host allowlist via `APOLLO_OCI_PLAIN_HTTP_HOSTS`.
 
 Binaries
 --------

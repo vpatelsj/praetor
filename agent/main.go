@@ -255,6 +255,12 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			PID:              0,
 			StartTime:        "",
 		}
+		paths := systemd.PathsFor(item.Namespace, item.Name)
+		currentManaged := carryManaged(a.managed[key], paths.UnitName)
+		appendAndContinue := func() {
+			obs = append(obs, observation)
+			managedNow[key] = currentManaged
+		}
 
 		if item.Spec.RestartPolicy == apiv1alpha1.DeviceProcessRestartPolicyNever {
 			msg := "DaemonSet semantics: agent will start service when stopped even if Restart=no; RestartPolicy affects systemd only."
@@ -266,8 +272,21 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.Info("unsupported backend, skipping", "namespace", item.Namespace, "name", item.Name, "backend", item.Spec.Execution.Backend)
 			observation.ProcessStarted = boolPtr(false)
 			observation.Healthy = boolPtr(false)
-			obs = append(obs, observation)
+			appendAndContinue()
 			continue
+		}
+
+		if item.Spec.Artifact.Type != apiv1alpha1.ArtifactTypeOCI {
+			observation.ArtifactDigest = ""
+			observation.ArtifactDownloadAttempts = 0
+			observation.LastArtifactAttemptTime = ""
+			observation.ArtifactLastError = ""
+			observation.ArtifactDownloaded = boolPtr(false)
+			observation.ArtifactVerified = boolPtr(false)
+			observation.ArtifactDownloadReason = "NotApplicable"
+			observation.ArtifactDownloadMessage = "artifact type not oci"
+			observation.ArtifactVerifyReason = "NotApplicable"
+			observation.ArtifactVerifyMessage = "artifact type not oci"
 		}
 
 		if item.Spec.Artifact.Type == apiv1alpha1.ArtifactTypeOCI {
@@ -278,10 +297,10 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.ArtifactLastError = result.lastError
 			observation.ArtifactDownloaded = boolPtr(result.downloaded)
 			observation.ArtifactVerified = boolPtr(result.verified)
-			downloadReason := "ArtifactDownloaded"
-			downloadMessage := "artifact downloaded"
-			verifyReason := "ArtifactVerified"
-			verifyMessage := "artifact verified"
+			downloadReason := defaultString(result.downloadReason, "ArtifactDownloaded")
+			downloadMessage := defaultString(result.downloadMessage, "artifact downloaded")
+			verifyReason := defaultString(result.verifyReason, "ArtifactVerified")
+			verifyMessage := defaultString(result.verifyMessage, "artifact verified")
 
 			if err != nil {
 				a.logger.Error(err, "ensure oci artifact", "namespace", item.Namespace, "name", item.Name, "ref", item.Spec.Artifact.URL)
@@ -290,22 +309,26 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				} else {
 					observation.ErrorMessage = stringPtr(err.Error())
 				}
-				downloadReason = "ArtifactDownloadFailed"
-				downloadMessage = strings.TrimSpace(result.lastError)
-				if downloadMessage == "" {
+				if downloadReason == "" {
+					downloadReason = "ArtifactDownloadFailed"
+				}
+				if strings.TrimSpace(downloadMessage) == "" {
 					downloadMessage = err.Error()
 				}
-				verifyReason = "ArtifactVerifyFailed"
-				verifyMessage = downloadMessage
+				if verifyReason == "" {
+					verifyReason = "ArtifactVerifyFailed"
+				}
+				if strings.TrimSpace(verifyMessage) == "" {
+					verifyMessage = downloadMessage
+				}
 				observation.ProcessStarted = boolPtr(false)
 				observation.Healthy = boolPtr(false)
-				_ = stopAndDisableQuiet(ctx, a.logger, systemd.PathsFor(item.Namespace, item.Name).UnitName)
-				obs = append(obs, observation)
-				managedNow[key] = carryManaged(a.managed[key], systemd.PathsFor(item.Namespace, item.Name).UnitName)
+				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
 				observation.ArtifactDownloadReason = downloadReason
 				observation.ArtifactDownloadMessage = downloadMessage
 				observation.ArtifactVerifyReason = verifyReason
 				observation.ArtifactVerifyMessage = verifyMessage
+				appendAndContinue()
 				continue
 			}
 
@@ -314,13 +337,12 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				observation.ErrorMessage = stringPtr(err.Error())
 				observation.ProcessStarted = boolPtr(false)
 				observation.Healthy = boolPtr(false)
-				_ = stopAndDisableQuiet(ctx, a.logger, systemd.PathsFor(item.Namespace, item.Name).UnitName)
-				obs = append(obs, observation)
-				managedNow[key] = carryManaged(a.managed[key], systemd.PathsFor(item.Namespace, item.Name).UnitName)
+				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
 				observation.ArtifactDownloadReason = downloadReason
 				observation.ArtifactDownloadMessage = downloadMessage
 				observation.ArtifactVerifyReason = verifyReason
 				observation.ArtifactVerifyMessage = verifyMessage
+				appendAndContinue()
 				continue
 			}
 			item.Spec.Execution.Command = resolvedCmd
@@ -330,7 +352,6 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.ArtifactVerifyMessage = verifyMessage
 		}
 
-		paths := systemd.PathsFor(item.Namespace, item.Name)
 		unitContent, envContent, err := renderUnitFiles(item, paths.EnvPath)
 		if err != nil {
 			a.logger.Error(err, "render unit", "namespace", item.Namespace, "name", item.Name)
@@ -348,8 +369,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 					a.logger.Error(err, "daemon-reload after unit removal", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
 				}
 			}
-			obs = append(obs, observation)
-			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
+			appendAndContinue()
 			continue
 		}
 
@@ -360,8 +380,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.Healthy = boolPtr(false)
 			observation.ErrorMessage = stringPtr(err.Error())
 			_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
-			obs = append(obs, observation)
-			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
+			appendAndContinue()
 			continue
 		}
 
@@ -372,7 +391,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 		}
 
 		prevManaged, hadPrev := a.managed[key]
-		currentManaged := carryManaged(prevManaged, paths.UnitName)
+		currentManaged = carryManaged(prevManaged, paths.UnitName)
 
 		if !hadPrev {
 			if err := systemd.EnableAndStart(ctx, paths.UnitName); err != nil {
@@ -381,8 +400,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				observation.Healthy = boolPtr(false)
 				observation.ErrorMessage = stringPtr(err.Error())
 				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
-				obs = append(obs, observation)
-				managedNow[key] = currentManaged
+				appendAndContinue()
 				continue
 			}
 			currentManaged = markAction(currentManaged, item.SpecHash, "enable-and-start")
@@ -393,8 +411,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				observation.Healthy = boolPtr(false)
 				observation.ErrorMessage = stringPtr(err.Error())
 				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
-				obs = append(obs, observation)
-				managedNow[key] = currentManaged
+				appendAndContinue()
 				continue
 			}
 			currentManaged = markAction(currentManaged, item.SpecHash, "restart")
@@ -453,8 +470,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.V(1).Info("unit status", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName, "active", activeState, "sub", subState, "pid", pid, "start", startTime)
 		}
 
-		obs = append(obs, observation)
-		managedNow[key] = currentManaged
+		appendAndContinue()
 	}
 
 	for key, managed := range a.managed {
@@ -561,7 +577,23 @@ func resolveCommand(cmd []string, rootfs string) ([]string, error) {
 	if clean == "" {
 		return nil, fmt.Errorf("invalid command")
 	}
-	res := append([]string{filepath.Join(rootfs, clean)}, cmd[1:]...)
+	normalized := filepath.Clean(clean)
+	if strings.HasPrefix(normalized, "..") || filepath.IsAbs(normalized) {
+		return nil, fmt.Errorf("command must not escape artifact rootfs: %s", cmd[0])
+	}
+	joined := filepath.Join(rootfs, normalized)
+	rootAbs, err := filepath.Abs(rootfs)
+	if err != nil {
+		return nil, err
+	}
+	joinedAbs, err := filepath.Abs(joined)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(joinedAbs, rootAbs+string(os.PathSeparator)) && joinedAbs != rootAbs {
+		return nil, fmt.Errorf("command path escapes rootfs: %s", cmd[0])
+	}
+	res := append([]string{joined}, cmd[1:]...)
 	return res, nil
 }
 
@@ -759,6 +791,13 @@ func boolPtr(v bool) *bool {
 
 func stringPtr(v string) *string {
 	return &v
+}
+
+func defaultString(val, fallback string) string {
+	if strings.TrimSpace(val) == "" {
+		return fallback
+	}
+	return val
 }
 
 func itemKey(ns, name string) string {

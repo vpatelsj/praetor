@@ -8,23 +8,22 @@ spec:
     name: compute-01
   artifact:
     type: oci
-    url: ghcr.io/example/log-forwarder:1.2.3
-    checksumSHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    url: ghcr.io/example/log-forwarder@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   execution:
     backend: systemd
     command:
-    - /usr/local/bin/log-forwarder
+    - payload/bin/log-forwarder
     args:
-    - --config=/etc/log-forwarder.yaml
+    - --config=payload/config/log-forwarder.yaml
     env:
     - name: LOG_LEVEL
       value: info
-    workingDir: /var/lib/log-forwarder
+    workingDir: payload
   restartPolicy: Always
   healthCheck:
     exec:
       command:
-      - /usr/local/bin/log-forwarder
+      - payload/bin/log-forwarder
       - healthcheck
     periodSeconds: 30
     timeoutSeconds: 5

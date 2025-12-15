@@ -51,6 +51,10 @@ type ociResult struct {
 	attempts        int32
 	lastAttemptTime string
 	lastError       string
+	downloadReason  string
+	downloadMessage string
+	verifyReason    string
+	verifyMessage   string
 }
 
 type ociFetcherImpl struct {
@@ -67,7 +71,7 @@ func newOCIFetcher(logger logr.Logger, root string) ociFetcher {
 }
 
 func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, error) {
-	res := ociResult{}
+	res := ociResult{downloadReason: "ArtifactDownloadFailed", verifyReason: "ArtifactVerifyFailed"}
 	parsedRef, err := registry.ParseReference(strings.TrimSpace(ref))
 	if err != nil {
 		return res, fmt.Errorf("invalid oci ref: %w", err)
@@ -102,6 +106,11 @@ func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, err
 		res.digest = parsedRef.Reference
 		res.downloaded = true
 		res.verified = true
+		res.downloadReason = "ArtifactDownloaded"
+		res.downloadMessage = "artifact cached"
+		res.verifyReason = "ArtifactVerified"
+		res.verifyMessage = "artifact cached"
+		res.lastError = ""
 		return res, nil
 	}
 
@@ -115,6 +124,7 @@ func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, err
 	if err != nil {
 		return res, err
 	}
+	repository.PlainHTTP = allowPlainHTTP(parsedRef.Registry)
 
 	attempts := int32(0)
 	var desc ocispec.Descriptor
@@ -141,9 +151,15 @@ func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, err
 		res.lastError = errorString(err)
 		return res, err
 	}
+	res.downloaded = true
+	res.downloadReason = "ArtifactDownloaded"
+	res.downloadMessage = "artifact downloaded"
+	res.digest = parsedRef.Reference
 
 	if desc.Digest.String() != parsedRef.Reference {
 		res.lastError = fmt.Sprintf("unexpected manifest digest %s (want %s)", desc.Digest.String(), parsedRef.Reference)
+		res.verifyReason = "DigestMismatch"
+		res.verifyMessage = res.lastError
 		return res, fmt.Errorf(res.lastError)
 	}
 
@@ -159,6 +175,13 @@ func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, err
 	}
 	if len(manifest.Layers) == 0 {
 		res.lastError = "manifest has no layers"
+		res.verifyMessage = res.lastError
+		return res, fmt.Errorf(res.lastError)
+	}
+	if len(manifest.Layers) != 1 {
+		res.lastError = "MVP requires single-layer tar artifact"
+		res.verifyReason = "UnsupportedArtifact"
+		res.verifyMessage = res.lastError
 		return res, fmt.Errorf(res.lastError)
 	}
 	layer := manifest.Layers[0]
@@ -179,6 +202,15 @@ func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, err
 	if err != nil {
 		os.RemoveAll(tmpRoot)
 		res.lastError = errorString(err)
+		res.verifyMessage = res.lastError
+		if ee, ok := err.(extractError); ok {
+			if ee.reason != "" {
+				res.verifyReason = ee.reason
+			}
+			if ee.msg != "" {
+				res.verifyMessage = ee.msg
+			}
+		}
 		return res, err
 	}
 
@@ -218,8 +250,22 @@ func (f *ociFetcherImpl) Ensure(ctx context.Context, ref string) (ociResult, err
 	res.digest = parsedRef.Reference
 	res.downloaded = true
 	res.verified = true
+	res.verifyReason = "ArtifactVerified"
+	res.verifyMessage = "artifact verified"
 	res.lastError = ""
 	return res, nil
+}
+
+type extractError struct {
+	reason string
+	msg    string
+}
+
+func (e extractError) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return e.reason
 }
 
 func extractLayer(r io.Reader, mediaType, dest string) (int64, error) {
@@ -248,13 +294,13 @@ func extractLayer(r io.Reader, mediaType, dest string) (int64, error) {
 		if name == "." || name == "" {
 			continue
 		}
-		if filepath.IsAbs(name) || strings.Contains(name, "..") {
-			return total, fmt.Errorf("rejecting unsafe path %q", hdr.Name)
+		if filepath.IsAbs(name) || strings.HasPrefix(name, "..") || strings.Contains(name, "../") {
+			return total, extractError{reason: "InvalidPath", msg: fmt.Sprintf("rejecting unsafe path %q", hdr.Name)}
 		}
 
 		target := filepath.Join(dest, name)
 		if !strings.HasPrefix(target, dest+string(os.PathSeparator)) {
-			return total, fmt.Errorf("rejecting path outside rootfs: %q", hdr.Name)
+			return total, extractError{reason: "InvalidPath", msg: fmt.Sprintf("rejecting path outside rootfs: %q", hdr.Name)}
 		}
 
 		switch hdr.Typeflag {
@@ -277,7 +323,7 @@ func extractLayer(r io.Reader, mediaType, dest string) (int64, error) {
 				return total, err
 			}
 		default:
-			return total, fmt.Errorf("unsupported entry type for %q", hdr.Name)
+			return total, extractError{reason: "UnsupportedEntryType", msg: fmt.Sprintf("unsupported entry type %d for %q", hdr.Typeflag, hdr.Name)}
 		}
 	}
 	return total, nil
@@ -339,4 +385,32 @@ func errorString(err error) string {
 		return msg[:300]
 	}
 	return msg
+}
+
+func allowPlainHTTP(reg string) bool {
+	plainAll := strings.EqualFold(strings.TrimSpace(os.Getenv("APOLLO_OCI_PLAIN_HTTP")), "1") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("APOLLO_OCI_PLAIN_HTTP")), "true")
+
+	hostOnly := reg
+	if h, _, err := net.SplitHostPort(reg); err == nil {
+		hostOnly = h
+	}
+	hostOnly = strings.ToLower(hostOnly)
+
+	if plainAll {
+		return true
+	}
+
+	allowlist := strings.FieldsFunc(strings.TrimSpace(os.Getenv("APOLLO_OCI_PLAIN_HTTP_HOSTS")), func(r rune) bool { return r == ',' })
+	for _, h := range allowlist {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if h == hostOnly {
+			return true
+		}
+	}
+
+	return false
 }

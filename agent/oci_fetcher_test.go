@@ -84,6 +84,14 @@ func makeTar(entries map[string]string) []byte {
 	return buf.Bytes()
 }
 
+func makeSymlinkTar(name, target string) []byte {
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeSymlink, Linkname: target})
+	_ = tw.Close()
+	return buf.Bytes()
+}
+
 func TestEnsureOCICacheHitSkipsPull(t *testing.T) {
 	dir := t.TempDir()
 	digestStr := "sha256:" + strings.Repeat("0", 64)
@@ -167,6 +175,96 @@ func TestEnsureOCIRetriesThenSucceeds(t *testing.T) {
 	}
 	if res.lastAttemptTime == "" {
 		t.Fatalf("expected lastAttemptTime set")
+	}
+}
+
+func TestEnsureOCIMultiLayerFails(t *testing.T) {
+	digestStr := "sha256:" + strings.Repeat("3", 64)
+	restore := withOCIOverrides(t, func(ctx context.Context, src oras.Target, srcRef string, dst oras.Target, dstRef string, opts oras.CopyOptions) (ocispec.Descriptor, error) {
+		store := dst.(*oci.Store)
+		manifest := ocispec.Manifest{Layers: []ocispec.Descriptor{{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromString("layer1"), Size: 1}, {MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromString("layer2"), Size: 1}}}
+		manifestBytes, _ := json.Marshal(manifest)
+		desc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: digest.FromBytes(manifestBytes), Size: int64(len(manifestBytes))}
+		_ = store.Push(ctx, desc, bytes.NewReader(manifestBytes))
+		_ = store.Tag(ctx, desc, dstRef)
+		return desc, nil
+	})
+	defer restore()
+
+	f := newOCIFetcher(logr.Discard(), t.TempDir())
+	res, err := f.Ensure(context.Background(), "ghcr.io/example/app@"+digestStr)
+	if err == nil {
+		t.Fatalf("expected multi-layer error")
+	}
+	if !res.downloaded || res.verified {
+		t.Fatalf("expected downloaded true, verified false")
+	}
+	if res.verifyReason != "UnsupportedArtifact" {
+		t.Fatalf("unexpected verifyReason %q", res.verifyReason)
+	}
+}
+
+func TestEnsureOCIRejectsSymlink(t *testing.T) {
+	digestStr := "sha256:" + strings.Repeat("4", 64)
+	restore := withOCIOverrides(t, func(ctx context.Context, src oras.Target, srcRef string, dst oras.Target, dstRef string, opts oras.CopyOptions) (ocispec.Descriptor, error) {
+		store := dst.(*oci.Store)
+		tarBytes := makeSymlinkTar("bin/app", "/etc/passwd")
+		return pushSingleLayer(store, dstRef, tarBytes, ocispec.MediaTypeImageLayer)
+	})
+	defer restore()
+
+	f := newOCIFetcher(logr.Discard(), t.TempDir())
+	res, err := f.Ensure(context.Background(), "ghcr.io/example/app@"+digestStr)
+	if err == nil {
+		t.Fatalf("expected symlink rejection")
+	}
+	if res.verifyReason != "UnsupportedEntryType" {
+		t.Fatalf("expected UnsupportedEntryType, got %q", res.verifyReason)
+	}
+}
+
+func TestAllowPlainHTTP(t *testing.T) {
+	digestStr := "sha256:" + strings.Repeat("5", 64)
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "default disallow", env: nil, want: false},
+		{name: "allow all", env: map[string]string{"APOLLO_OCI_PLAIN_HTTP": "true"}, want: true},
+		{name: "allow host", env: map[string]string{"APOLLO_OCI_PLAIN_HTTP_HOSTS": "registry.local:5000"}, want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			origCopy, origRepo, origNow := orasCopy, newRemoteRepository, nowFunc
+			defer func() {
+				orasCopy, newRemoteRepository, nowFunc = origCopy, origRepo, origNow
+			}()
+
+			seenPlain := false
+			nowFunc = func() time.Time { return time.Unix(0, 0).UTC() }
+			newRemoteRepository = func(ref string) (*remote.Repository, error) {
+				return &remote.Repository{}, nil
+			}
+			orasCopy = func(ctx context.Context, src oras.Target, srcRef string, dst oras.Target, dstRef string, opts oras.CopyOptions) (ocispec.Descriptor, error) {
+				if repo, ok := src.(*remote.Repository); ok {
+					seenPlain = repo.PlainHTTP
+				}
+				return ocispec.Descriptor{}, errors.New("fail")
+			}
+
+			f := newOCIFetcher(logr.Discard(), t.TempDir())
+			_, _ = f.Ensure(context.Background(), "registry.local:5000/app@"+digestStr)
+
+			if seenPlain != tc.want {
+				t.Fatalf("PlainHTTP=%v, want %v", seenPlain, tc.want)
+			}
+		})
 	}
 }
 
