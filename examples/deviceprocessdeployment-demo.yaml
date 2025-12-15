@@ -10,15 +10,20 @@ spec:
   template:
     metadata:
       labels:
-        app: logger
+        app: firmware-upgrade
+        site: sfo
+        role: tor
     spec:
       artifact:
         type: oci
-        url: alpine:3.19
+        url: localhost:5000/log-forwarder@sha256:REPLACE_ME
       execution:
         backend: systemd
-        command: ["/bin/sh", "-c"]
-        args: ["echo hello from ${APOLLO_DEVICE_NAME}; sleep 3600"]
+        command:
+        - payload/bin/log-forwarder
+        args:
+        - --config=payload/config/log-forwarder.yaml
         env:
         - name: APOLLO_DEVICE_NAME
           value: ${APOLLO_DEVICE_NAME}
+      restartPolicy: Always

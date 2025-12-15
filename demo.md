@@ -4,45 +4,13 @@
 # Quick start (with real OCI artifact demo)
 
 This walkthrough builds a single-layer payload tar, pushes it to a local/plain-HTTP registry, references it by **digest**, and runs the agents against that artifact.
+`make demo-build` now also builds/pushes the payload to `localhost:5000/log-forwarder:demo` and writes the digest to `/tmp/log-forwarder.digest`. `make install-crs` uses that digest and rewrites the registry host to `host.docker.internal` so agents can pull.
 
-Terminal 1 (cluster + controller/gateway):
+
 ```
+make clean-all
 make demo-up
-```
-----
-Terminal 2 (build+push demo artifact, apply CRs, port-forward gateway):
-```
-# 2a) Build payload tarball (relative paths expected by agent)
-mkdir -p /tmp/payload/bin /tmp/payload/config
-echo -e '#!/bin/sh\necho hello demo\nsleep 3600' > /tmp/payload/bin/log-forwarder
-chmod +x /tmp/payload/bin/log-forwarder
-echo 'log: info' > /tmp/payload/config/log-forwarder.yaml
-tar -C /tmp -cf /tmp/payload.tar payload
-
-# 2b) Push to local registry (plain HTTP), capture digest
-REG=localhost:5000
-oras push $REG/log-forwarder:demo \
-  /tmp/payload.tar:application/vnd.oci.image.layer.v1.tar
-DIGEST=$(oras manifest fetch --descriptor $REG/log-forwarder:demo | jq -r '.digest')
-echo "Pushed digest: $DIGEST"
-
-# 2c) Allow plain HTTP for the agent
-export APOLLO_OCI_PLAIN_HTTP=1
-
-# 2d) Apply CRDs and samples patched to use the digest + relative commands
-make install-crs
-sed "s|sha256:0123.*|${DIGEST#sha256:}|" config/samples/azure_v1alpha1_deviceprocessdeployment.yaml \
-  | kubectl apply -f -
-sed "s|sha256:0123.*|${DIGEST#sha256:}|" config/samples/azure_v1alpha1_deviceprocess.yaml \
-  | kubectl apply -f -
-
-# 2e) Port-forward gateway for local agents (choose one port and stick with it)
-kubectl -n default port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 18080:8080
-```
-----
-Terminal 3 (run demo agents + monitor):
-```
-export APOLLO_GATEWAY_URL=http://<host-ip>:18080
+make install-crs  
 make start-device-agents
 
 watch make monitor

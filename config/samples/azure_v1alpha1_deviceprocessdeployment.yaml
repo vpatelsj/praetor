@@ -5,8 +5,8 @@ metadata:
 spec:
   selector:
     matchLabels:
-      role: edge
-      os: linux
+      site: sfo
+      role: tor
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -15,7 +15,8 @@ spec:
     metadata:
       labels:
         app: log-forwarder
-        role: edge
+        site: sfo
+        role: tor
     spec:
       artifact:
         type: oci

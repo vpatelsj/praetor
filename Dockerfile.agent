@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 	CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /agent ./agent
 
 FROM jrei/systemd-debian:12
-ENV container docker
+ENV container=docker
 
 # prep paths systemd units will use
 RUN mkdir -p /etc/apollo/env /var/lib/apollo/agent

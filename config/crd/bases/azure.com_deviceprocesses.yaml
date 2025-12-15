@@ -223,6 +223,19 @@ spec:
           status:
             description: DeviceProcessStatus defines the observed state of DeviceProcess.
             properties:
+              artifactDigest:
+                description: ArtifactDigest is the digest of the fetched artifact
+                  manifest.
+                type: string
+              artifactDownloadAttempts:
+                description: ArtifactDownloadAttempts tracks the number of fetch attempts
+                  in the latest reconcile.
+                format: int32
+                type: integer
+              artifactLastError:
+                description: ArtifactLastError captures the last fetch/verify error
+                  message, if any.
+                type: string
               artifactVersion:
                 description: ArtifactVersion is the resolved artifact version (tag
                   or digest).
@@ -297,6 +310,10 @@ spec:
                   - type
                   type: object
                 type: array
+              lastArtifactAttemptTime:
+                description: LastArtifactAttemptTime records when the last fetch attempt
+                  occurred (RFC3339).
+                type: string
               lastTerminationReason:
                 description: LastTerminationReason describes why the process last
                   exited.
