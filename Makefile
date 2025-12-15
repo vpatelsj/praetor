@@ -110,8 +110,16 @@ demo-up: ensure-kind clean
 install-crs: crd-install controller-deploy gateway-deploy
 	kubectl apply -f examples/networkswitches-demo.yaml
 	kubectl apply -f examples/deviceprocessdeployment-demo.yaml
-	@echo "Port-forwarding gateway on 0.0.0.0:$(FORWARD_PORT) -> 8080 (ctrl-c to stop)"
-	kubectl -n $(NAMESPACE) port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 $(FORWARD_PORT):8080
+	@LOG=/tmp/apollo-gateway-port-forward.log; PIDFILE=/tmp/apollo-gateway-port-forward.pid; \
+	  echo "Port-forwarding gateway on 0.0.0.0:$(FORWARD_PORT) -> 8080 (background)"; \
+	  if [ -f $$PIDFILE ] && kill -0 "$$(<$$PIDFILE)" 2>/dev/null; then \
+	    echo "Stopping existing port-forward pid $$(cat $$PIDFILE)"; \
+	    kill "$$(<$$PIDFILE)" || true; \
+	    sleep 1; \
+	  fi; \
+	  nohup kubectl -n $(NAMESPACE) port-forward deploy/apollo-deviceprocess-gateway --address 0.0.0.0 $(FORWARD_PORT):8080 > $$LOG 2>&1 & \
+	  echo $$! > $$PIDFILE; \
+	  echo "Started port-forward (pid $$!); log: $$LOG; stop with 'kill $$(cat $$PIDFILE)'"
 
 # Quick monitor: list key resources
 monitor:

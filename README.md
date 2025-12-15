@@ -14,10 +14,9 @@ Spin up a kind cluster, installs CRDs and controllers, applies the demo DevicePr
 Terminal 1 (cluster + controller/gateway):
 ```
 make demo-up
-watch make monitor
 ```
 ----
-Terminal 2 (apply demo CRs + port-forward gateway):
+Terminal 2 (apply demo CRs + port-forward gateway in background):
 ```
 make install-crs
 ```
@@ -25,7 +24,10 @@ make install-crs
 Terminal 3 (run demo agents):
 ```
 make start-device-agents
+
+watch make monitor
 ```
+
 
 
 ![Demo walkthrough](images/demo2.gif)
