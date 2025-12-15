@@ -1,23 +1,16 @@
 
 
 
-# Quick start
+# Quick start (with real OCI artifact demo)
 
-Demo that spins up a kind cluster, installs CRDs and controllers, applies the demo DeviceProcessDeployment that fans out two DeviceProcess objects for the demo NetworkSwitches, and then starts the device agents that update deployment status via the gateway.
- 
-Terminal 1 (cluster + controller/gateway):
+This walkthrough builds a single-layer payload tar, pushes it to a local/plain-HTTP registry, references it by **digest**, and runs the agents against that artifact.
+`make demo-build` now also builds/pushes the payload to `localhost:5000/log-forwarder:demo` and writes the digest to `/tmp/log-forwarder.digest`. `make install-crs` uses that digest and rewrites the registry host to `host.docker.internal` so agents can pull.
+
+
 ```
+make clean-all
 make demo-up
-
-```
-----
-Terminal 2 (apply demo CRs + port-forward gateway in background):
-```
-make install-crs
-```
----
-Terminal 3 (run demo agents):
-```
+make install-crs  
 make start-device-agents
 
 watch make monitor

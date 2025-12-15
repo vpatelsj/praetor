@@ -12,6 +12,7 @@ const (
 	ConditionSpecWarning ConditionType = "SpecWarning"
 	// Artifact lifecycle
 	ConditionArtifactDownloaded ConditionType = "ArtifactDownloaded"
+	ConditionArtifactVerified   ConditionType = "ArtifactVerified"
 	// Process lifecycle
 	ConditionProcessStarted ConditionType = "ProcessStarted"
 	ConditionHealthy        ConditionType = "Healthy"

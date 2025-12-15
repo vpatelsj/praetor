@@ -1,7 +1,7 @@
 Praetor
 ====================
 
-Control plane for managing processes on devices (network switches, BMCs, DPUs) without kubelets on the devices. A controller fans out `DeviceProcessDeployment` into per-device `DeviceProcess` objects; a gateway mediates all device traffic, and lightweight agents on the devices fetch desired state and report status over HTTP. The gateway can run in- or out-of-cluster, aggregates device status, and shields the apiserver from high fan-out.
+Control plane for managing processes on devices (network switches, BMCs, DPUs) without kubelets on the devices. A controller fans out `DeviceProcessDeployment` into per-device `DeviceProcess` objects; a gateway mediates all device traffic, and lightweight agents on the devices fetch desired state and report status over HTTP. Agents support a systemd backend that pulls digest-pinned OCI artifacts (single-layer tars), extracts them on the device, and renders/starts systemd units from the payload. The gateway can run in- or out-of-cluster, aggregates device status, and shields the apiserver from high fan-out.
 
 
 
@@ -9,15 +9,24 @@ Control plane for managing processes on devices (network switches, BMCs, DPUs) w
 Quick Start
 -----------
 
-Spin up a kind cluster, installs CRDs and controllers, applies the demo DeviceProcessDeployment that fans out two DeviceProcess objects for the demo NetworkSwitches, and then starts the device agents that update deployment status via the gateway.
+Spin up a kind cluster, builds/pushes a single-layer OCI payload to a local plain-HTTP registry, applies the demo DeviceProcessDeployment with a digest reference (rewritten to `host.docker.internal:5000` so agents can pull), and starts systemd-based agents that reconcile and report status via the gateway.
 
 ```
-make demo-up
-make install-crs
-make start-device-agents
+make clean-all           # optional: remove prior cluster/agents
+make demo-up             # rebuild images, load into kind, build/push payload, write digest to /tmp/log-forwarder.digest
+make install-crs         # install CRDs/controller/gateway, port-forward, apply demo using the saved digest and host.docker.internal:5000
+make start-device-agents # systemd-in-container agents with plain-HTTP allowlist baked in
 
 watch make monitor
 ```
+
+Local demo (plain HTTP registry)
+--------------------------------
+- Build a single-layer payload tarball (e.g., `tar -C payload -cf payload.tar .`) with binaries/config under `payload/`.
+- Push it to your local registry with a digest tag, e.g., `oras push localhost:5000/log-forwarder:demo payload.tar:application/vnd.oci.image.layer.v1.tar` then note the digest.
+- Allow plain HTTP for local registries: export `APOLLO_OCI_PLAIN_HTTP=1` or `APOLLO_OCI_PLAIN_HTTP_HOSTS=localhost,127.0.0.1,kind-registry` for agents.
+- Update `config/samples/*deviceprocess*.yaml` to reference the digest (`ref@sha256:...`) and use relative commands (e.g., `payload/bin/log-forwarder`).
+- Apply the CRs, start the gateway/agent binaries, and watch status via `make monitor`.
 
 
 
@@ -60,6 +69,9 @@ Operational notes
 - Stale detection: `stale-multiplier × heartbeat` (default 3×15s) marks agents disconnected.
 - Heavy use of ETag means most desired polls return 304; 200 only when spec changes or ETag is missing.
 - Field index on `spec.deviceRef.name` avoids cluster-wide list scans when serving desired.
+- OCI artifacts must be digest-pinned; commands/args/workingDir are resolved relative to the extracted rootfs (no leading `/`).
+- Artifact extraction is atomic (temp dir → rename) and only marked READY after successful verify/extraction.
+- Plain-HTTP registries are blocked by default; opt-in with `APOLLO_OCI_PLAIN_HTTP=1` or host allowlist via `APOLLO_OCI_PLAIN_HTTP_HOSTS`.
 
 Binaries
 --------

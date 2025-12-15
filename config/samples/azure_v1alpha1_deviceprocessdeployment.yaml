@@ -5,8 +5,8 @@ metadata:
 spec:
   selector:
     matchLabels:
-      role: edge
-      os: linux
+      site: sfo
+      role: tor
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -15,22 +15,23 @@ spec:
     metadata:
       labels:
         app: log-forwarder
-        role: edge
+        site: sfo
+        role: tor
     spec:
       artifact:
         type: oci
-        url: ghcr.io/example/log-forwarder:1.2.3
+        url: ghcr.io/example/log-forwarder@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       execution:
         backend: systemd
         command:
-        - /usr/local/bin/log-forwarder
+        - payload/bin/log-forwarder
         args:
-        - --config=/etc/log-forwarder.yaml
+        - --config=payload/config/log-forwarder.yaml
       restartPolicy: Always
       healthCheck:
         exec:
           command:
-          - /usr/local/bin/log-forwarder
+          - payload/bin/log-forwarder
           - healthcheck
         periodSeconds: 30
         timeoutSeconds: 5

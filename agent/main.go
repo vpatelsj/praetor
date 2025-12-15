@@ -45,6 +45,11 @@ type agentState struct {
 	Managed map[string]managedItem `json:"managed"`
 }
 
+// ociFetcher abstracts OCI artifact resolution for testing.
+type ociFetcher interface {
+	Ensure(ctx context.Context, ref string) (ociResult, error)
+}
+
 type agent struct {
 	deviceName        string
 	gatewayURL        string
@@ -59,6 +64,7 @@ type agent struct {
 	statePath         string
 	heartbeat         time.Duration
 	rnd               *rand.Rand
+	oci               ociFetcher
 }
 
 func main() {
@@ -99,7 +105,9 @@ func main() {
 		statePath:         statePath,
 		heartbeat:         time.Duration(defaultHeartbeatSeconds) * time.Second,
 		rnd:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		oci:               nil,
 	}
+	ag.oci = newOCIFetcher(logger, "")
 
 	if err := ag.loadState(); err != nil {
 		logger.Error(err, "load agent state", "path", statePath)
@@ -230,6 +238,9 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 	if desired == nil {
 		return nil, nil
 	}
+	if a.oci == nil {
+		a.oci = newOCIFetcher(a.logger, "")
+	}
 
 	obs := make([]gateway.Observation, 0, len(desired.Items))
 	managedNow := make(map[string]managedItem, len(desired.Items))
@@ -244,6 +255,12 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			PID:              0,
 			StartTime:        "",
 		}
+		paths := systemd.PathsFor(item.Namespace, item.Name)
+		currentManaged := carryManaged(a.managed[key], paths.UnitName)
+		appendAndContinue := func() {
+			obs = append(obs, observation)
+			managedNow[key] = currentManaged
+		}
 
 		if item.Spec.RestartPolicy == apiv1alpha1.DeviceProcessRestartPolicyNever {
 			msg := "DaemonSet semantics: agent will start service when stopped even if Restart=no; RestartPolicy affects systemd only."
@@ -255,11 +272,86 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.Info("unsupported backend, skipping", "namespace", item.Namespace, "name", item.Name, "backend", item.Spec.Execution.Backend)
 			observation.ProcessStarted = boolPtr(false)
 			observation.Healthy = boolPtr(false)
-			obs = append(obs, observation)
+			appendAndContinue()
 			continue
 		}
 
-		paths := systemd.PathsFor(item.Namespace, item.Name)
+		if item.Spec.Artifact.Type != apiv1alpha1.ArtifactTypeOCI {
+			observation.ArtifactDigest = ""
+			observation.ArtifactDownloadAttempts = 0
+			observation.LastArtifactAttemptTime = ""
+			observation.ArtifactLastError = ""
+			observation.ArtifactDownloaded = boolPtr(false)
+			observation.ArtifactVerified = boolPtr(false)
+			observation.ArtifactDownloadReason = "NotApplicable"
+			observation.ArtifactDownloadMessage = "artifact type not oci"
+			observation.ArtifactVerifyReason = "NotApplicable"
+			observation.ArtifactVerifyMessage = "artifact type not oci"
+		}
+
+		if item.Spec.Artifact.Type == apiv1alpha1.ArtifactTypeOCI {
+			result, err := a.oci.Ensure(ctx, item.Spec.Artifact.URL)
+			observation.ArtifactDigest = result.digest
+			observation.ArtifactDownloadAttempts = result.attempts
+			observation.LastArtifactAttemptTime = result.lastAttemptTime
+			observation.ArtifactLastError = result.lastError
+			observation.ArtifactDownloaded = boolPtr(result.downloaded)
+			observation.ArtifactVerified = boolPtr(result.verified)
+			downloadReason := defaultString(result.downloadReason, "ArtifactDownloaded")
+			downloadMessage := defaultString(result.downloadMessage, "artifact downloaded")
+			verifyReason := defaultString(result.verifyReason, "ArtifactVerified")
+			verifyMessage := defaultString(result.verifyMessage, "artifact verified")
+
+			if err != nil {
+				a.logger.Error(err, "ensure oci artifact", "namespace", item.Namespace, "name", item.Name, "ref", item.Spec.Artifact.URL)
+				if strings.TrimSpace(result.lastError) != "" {
+					observation.ErrorMessage = stringPtr(result.lastError)
+				} else {
+					observation.ErrorMessage = stringPtr(err.Error())
+				}
+				if downloadReason == "" {
+					downloadReason = "ArtifactDownloadFailed"
+				}
+				if strings.TrimSpace(downloadMessage) == "" {
+					downloadMessage = err.Error()
+				}
+				if verifyReason == "" {
+					verifyReason = "ArtifactVerifyFailed"
+				}
+				if strings.TrimSpace(verifyMessage) == "" {
+					verifyMessage = downloadMessage
+				}
+				observation.ProcessStarted = boolPtr(false)
+				observation.Healthy = boolPtr(false)
+				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
+				observation.ArtifactDownloadReason = downloadReason
+				observation.ArtifactDownloadMessage = downloadMessage
+				observation.ArtifactVerifyReason = verifyReason
+				observation.ArtifactVerifyMessage = verifyMessage
+				appendAndContinue()
+				continue
+			}
+
+			resolvedCmd, err := resolveCommand(item.Spec.Execution.Command, result.rootfsPath)
+			if err != nil {
+				observation.ErrorMessage = stringPtr(err.Error())
+				observation.ProcessStarted = boolPtr(false)
+				observation.Healthy = boolPtr(false)
+				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
+				observation.ArtifactDownloadReason = downloadReason
+				observation.ArtifactDownloadMessage = downloadMessage
+				observation.ArtifactVerifyReason = verifyReason
+				observation.ArtifactVerifyMessage = verifyMessage
+				appendAndContinue()
+				continue
+			}
+			item.Spec.Execution.Command = resolvedCmd
+			observation.ArtifactDownloadReason = downloadReason
+			observation.ArtifactDownloadMessage = downloadMessage
+			observation.ArtifactVerifyReason = verifyReason
+			observation.ArtifactVerifyMessage = verifyMessage
+		}
+
 		unitContent, envContent, err := renderUnitFiles(item, paths.EnvPath)
 		if err != nil {
 			a.logger.Error(err, "render unit", "namespace", item.Namespace, "name", item.Name)
@@ -277,8 +369,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 					a.logger.Error(err, "daemon-reload after unit removal", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName)
 				}
 			}
-			obs = append(obs, observation)
-			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
+			appendAndContinue()
 			continue
 		}
 
@@ -289,8 +380,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.Healthy = boolPtr(false)
 			observation.ErrorMessage = stringPtr(err.Error())
 			_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
-			obs = append(obs, observation)
-			managedNow[key] = carryManaged(a.managed[key], paths.UnitName)
+			appendAndContinue()
 			continue
 		}
 
@@ -301,7 +391,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 		}
 
 		prevManaged, hadPrev := a.managed[key]
-		currentManaged := carryManaged(prevManaged, paths.UnitName)
+		currentManaged = carryManaged(prevManaged, paths.UnitName)
 
 		if !hadPrev {
 			if err := systemd.EnableAndStart(ctx, paths.UnitName); err != nil {
@@ -310,8 +400,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				observation.Healthy = boolPtr(false)
 				observation.ErrorMessage = stringPtr(err.Error())
 				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
-				obs = append(obs, observation)
-				managedNow[key] = currentManaged
+				appendAndContinue()
 				continue
 			}
 			currentManaged = markAction(currentManaged, item.SpecHash, "enable-and-start")
@@ -322,8 +411,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 				observation.Healthy = boolPtr(false)
 				observation.ErrorMessage = stringPtr(err.Error())
 				_ = stopAndDisableQuiet(ctx, a.logger, paths.UnitName)
-				obs = append(obs, observation)
-				managedNow[key] = currentManaged
+				appendAndContinue()
 				continue
 			}
 			currentManaged = markAction(currentManaged, item.SpecHash, "restart")
@@ -382,8 +470,7 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			a.logger.V(1).Info("unit status", "namespace", item.Namespace, "name", item.Name, "unit", paths.UnitName, "active", activeState, "sub", subState, "pid", pid, "start", startTime)
 		}
 
-		obs = append(obs, observation)
-		managedNow[key] = currentManaged
+		appendAndContinue()
 	}
 
 	for key, managed := range a.managed {
@@ -472,6 +559,42 @@ func renderExecStart(cmd []string, args []string) (string, error) {
 		escaped = append(escaped, q)
 	}
 	return strings.Join(escaped, " "), nil
+}
+
+// resolveCommand makes a relative command absolute against the fetched rootfs.
+func resolveCommand(cmd []string, rootfs string) ([]string, error) {
+	if len(cmd) == 0 {
+		return nil, fmt.Errorf("missing command")
+	}
+	rootfs = strings.TrimSpace(rootfs)
+	if rootfs == "" {
+		return nil, fmt.Errorf("missing rootfs path")
+	}
+	if strings.HasPrefix(cmd[0], "/") {
+		return cmd, nil
+	}
+	clean := strings.TrimSpace(cmd[0])
+	if clean == "" {
+		return nil, fmt.Errorf("invalid command")
+	}
+	normalized := filepath.Clean(clean)
+	if strings.HasPrefix(normalized, "..") || filepath.IsAbs(normalized) {
+		return nil, fmt.Errorf("command must not escape artifact rootfs: %s", cmd[0])
+	}
+	joined := filepath.Join(rootfs, normalized)
+	rootAbs, err := filepath.Abs(rootfs)
+	if err != nil {
+		return nil, err
+	}
+	joinedAbs, err := filepath.Abs(joined)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(joinedAbs, rootAbs+string(os.PathSeparator)) && joinedAbs != rootAbs {
+		return nil, fmt.Errorf("command path escapes rootfs: %s", cmd[0])
+	}
+	res := append([]string{joined}, cmd[1:]...)
+	return res, nil
 }
 
 func escapeSystemdArg(arg string) (string, error) {
@@ -668,6 +791,13 @@ func boolPtr(v bool) *bool {
 
 func stringPtr(v string) *string {
 	return &v
+}
+
+func defaultString(val, fallback string) string {
+	if strings.TrimSpace(val) == "" {
+		return fallback
+	}
+	return val
 }
 
 func itemKey(ns, name string) string {

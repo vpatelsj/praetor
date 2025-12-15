@@ -64,15 +64,25 @@ type ReportRequest struct {
 
 // Observation reports the agent's view of a single DeviceProcess.
 type Observation struct {
-	Namespace        string  `json:"namespace"`
-	Name             string  `json:"name"`
-	ObservedSpecHash string  `json:"observedSpecHash"`
-	ProcessStarted   *bool   `json:"processStarted,omitempty"`
-	Healthy          *bool   `json:"healthy,omitempty"`
-	PID              int64   `json:"pid"`
-	StartTime        string  `json:"startTime"`
-	ErrorMessage     *string `json:"errorMessage,omitempty"`
-	WarningMessage   *string `json:"warningMessage,omitempty"`
+	Namespace                string  `json:"namespace"`
+	Name                     string  `json:"name"`
+	ObservedSpecHash         string  `json:"observedSpecHash"`
+	ProcessStarted           *bool   `json:"processStarted,omitempty"`
+	Healthy                  *bool   `json:"healthy,omitempty"`
+	PID                      int64   `json:"pid"`
+	StartTime                string  `json:"startTime"`
+	ErrorMessage             *string `json:"errorMessage,omitempty"`
+	WarningMessage           *string `json:"warningMessage,omitempty"`
+	ArtifactDigest           string  `json:"artifactDigest,omitempty"`
+	ArtifactDownloadAttempts int32   `json:"artifactDownloadAttempts,omitempty"`
+	LastArtifactAttemptTime  string  `json:"lastArtifactAttemptTime,omitempty"`
+	ArtifactLastError        string  `json:"artifactLastError,omitempty"`
+	ArtifactDownloaded       *bool   `json:"artifactDownloaded,omitempty"`
+	ArtifactVerified         *bool   `json:"artifactVerified,omitempty"`
+	ArtifactDownloadReason   string  `json:"artifactDownloadReason,omitempty"`
+	ArtifactDownloadMessage  string  `json:"artifactDownloadMessage,omitempty"`
+	ArtifactVerifyReason     string  `json:"artifactVerifyReason,omitempty"`
+	ArtifactVerifyMessage    string  `json:"artifactVerifyMessage,omitempty"`
 }
 
 const runtimeSemanticsDaemonSet = "DaemonSet"
@@ -435,6 +445,62 @@ func (g *Gateway) updateStatusForObservation(ctx context.Context, deviceName str
 			specObservedChanged = true
 		}
 
+		// Artifact download/verify conditions and telemetry.
+		if obs.ArtifactDownloaded != nil {
+			reason := strings.TrimSpace(obs.ArtifactDownloadReason)
+			if reason == "" {
+				reason = "ArtifactDownloaded"
+			}
+			msg := strings.TrimSpace(obs.ArtifactDownloadMessage)
+			if *obs.ArtifactDownloaded {
+				if msg == "" {
+					msg = "artifact downloaded"
+				}
+				conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionArtifactDownloaded, reason, msg)
+			} else {
+				if reason == "ArtifactDownloaded" {
+					reason = "ArtifactDownloadFailed"
+				}
+				if msg == "" {
+					msg = strings.TrimSpace(obs.ArtifactLastError)
+				}
+				if msg == "" {
+					msg = "artifact download failed"
+				}
+				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionArtifactDownloaded, reason, msg)
+			}
+		}
+
+		if obs.ArtifactVerified != nil {
+			reason := strings.TrimSpace(obs.ArtifactVerifyReason)
+			if reason == "" {
+				reason = "ArtifactVerified"
+			}
+			msg := strings.TrimSpace(obs.ArtifactVerifyMessage)
+			if *obs.ArtifactVerified {
+				if msg == "" {
+					msg = "artifact verified"
+				}
+				conditions.MarkTrue(&proc.Status.Conditions, apiv1alpha1.ConditionArtifactVerified, reason, msg)
+			} else {
+				if reason == "ArtifactVerified" {
+					reason = "ArtifactVerifyFailed"
+				}
+				if msg == "" {
+					msg = strings.TrimSpace(obs.ArtifactLastError)
+				}
+				if msg == "" {
+					msg = "artifact verification failed"
+				}
+				conditions.MarkFalse(&proc.Status.Conditions, apiv1alpha1.ConditionArtifactVerified, reason, msg)
+			}
+		}
+
+		proc.Status.ArtifactDigest = strings.TrimSpace(obs.ArtifactDigest)
+		proc.Status.ArtifactDownloadAttempts = obs.ArtifactDownloadAttempts
+		proc.Status.LastArtifactAttemptTime = strings.TrimSpace(obs.LastArtifactAttemptTime)
+		proc.Status.ArtifactLastError = strings.TrimSpace(obs.ArtifactLastError)
+
 		processStartedChanged := false
 		if obs.ProcessStarted != nil {
 			if *obs.ProcessStarted {
@@ -764,6 +830,10 @@ func reflectDeepEqualStatus(a, b apiv1alpha1.DeviceProcessStatus) bool {
 		a.RuntimeSemantics == b.RuntimeSemantics &&
 		conditionsEqual(a.Conditions, b.Conditions) &&
 		a.ArtifactVersion == b.ArtifactVersion &&
+		a.ArtifactDigest == b.ArtifactDigest &&
+		a.ArtifactDownloadAttempts == b.ArtifactDownloadAttempts &&
+		a.LastArtifactAttemptTime == b.LastArtifactAttemptTime &&
+		a.ArtifactLastError == b.ArtifactLastError &&
 		a.PID == b.PID &&
 		equalTimePtr(a.StartTime, b.StartTime) &&
 		equalTimePtr(a.LastTransitionTime, b.LastTransitionTime) &&

@@ -171,6 +171,14 @@ type DeviceProcessStatus struct {
 	RuntimeSemantics string `json:"runtimeSemantics,omitempty"`
 	// ArtifactVersion is the resolved artifact version (tag or digest).
 	ArtifactVersion string `json:"artifactVersion,omitempty"`
+	// ArtifactDigest is the digest of the fetched artifact manifest.
+	ArtifactDigest string `json:"artifactDigest,omitempty"`
+	// ArtifactDownloadAttempts tracks the number of fetch attempts in the latest reconcile.
+	ArtifactDownloadAttempts int32 `json:"artifactDownloadAttempts,omitempty"`
+	// LastArtifactAttemptTime records when the last fetch attempt occurred (RFC3339).
+	LastArtifactAttemptTime string `json:"lastArtifactAttemptTime,omitempty"`
+	// ArtifactLastError captures the last fetch/verify error message, if any.
+	ArtifactLastError string `json:"artifactLastError,omitempty"`
 	// PID is the process identifier on the target device.
 	PID int64 `json:"pid,omitempty"`
 	// StartTime is when the process started.
