@@ -8,6 +8,7 @@ require (
 	k8s.io/client-go v0.29.2
 	sigs.k8s.io/controller-runtime v0.17.5
 	sigs.k8s.io/controller-tools v0.14.0
+	oras.land/oras-go/v2 v2.3.1
 )
 
 require (

@@ -45,6 +45,11 @@ type agentState struct {
 	Managed map[string]managedItem `json:"managed"`
 }
 
+// ociFetcher abstracts OCI artifact resolution for testing.
+type ociFetcher interface {
+	Ensure(ctx context.Context, ref string) (ociResult, error)
+}
+
 type agent struct {
 	deviceName        string
 	gatewayURL        string
@@ -59,6 +64,7 @@ type agent struct {
 	statePath         string
 	heartbeat         time.Duration
 	rnd               *rand.Rand
+	oci               ociFetcher
 }
 
 func main() {
@@ -99,7 +105,9 @@ func main() {
 		statePath:         statePath,
 		heartbeat:         time.Duration(defaultHeartbeatSeconds) * time.Second,
 		rnd:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		oci:               nil,
 	}
+	ag.oci = newOCIFetcher(logger, "")
 
 	if err := ag.loadState(); err != nil {
 		logger.Error(err, "load agent state", "path", statePath)
@@ -230,6 +238,9 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 	if desired == nil {
 		return nil, nil
 	}
+	if a.oci == nil {
+		a.oci = newOCIFetcher(a.logger, "")
+	}
 
 	obs := make([]gateway.Observation, 0, len(desired.Items))
 	managedNow := make(map[string]managedItem, len(desired.Items))
@@ -257,6 +268,66 @@ func (a *agent) reconcile(ctx context.Context, desired *gateway.DesiredResponse)
 			observation.Healthy = boolPtr(false)
 			obs = append(obs, observation)
 			continue
+		}
+
+		if item.Spec.Artifact.Type == apiv1alpha1.ArtifactTypeOCI {
+			result, err := a.oci.Ensure(ctx, item.Spec.Artifact.URL)
+			observation.ArtifactDigest = result.digest
+			observation.ArtifactDownloadAttempts = result.attempts
+			observation.LastArtifactAttemptTime = result.lastAttemptTime
+			observation.ArtifactLastError = result.lastError
+			observation.ArtifactDownloaded = boolPtr(result.downloaded)
+			observation.ArtifactVerified = boolPtr(result.verified)
+			downloadReason := "ArtifactDownloaded"
+			downloadMessage := "artifact downloaded"
+			verifyReason := "ArtifactVerified"
+			verifyMessage := "artifact verified"
+
+			if err != nil {
+				a.logger.Error(err, "ensure oci artifact", "namespace", item.Namespace, "name", item.Name, "ref", item.Spec.Artifact.URL)
+				if strings.TrimSpace(result.lastError) != "" {
+					observation.ErrorMessage = stringPtr(result.lastError)
+				} else {
+					observation.ErrorMessage = stringPtr(err.Error())
+				}
+				downloadReason = "ArtifactDownloadFailed"
+				downloadMessage = strings.TrimSpace(result.lastError)
+				if downloadMessage == "" {
+					downloadMessage = err.Error()
+				}
+				verifyReason = "ArtifactVerifyFailed"
+				verifyMessage = downloadMessage
+				observation.ProcessStarted = boolPtr(false)
+				observation.Healthy = boolPtr(false)
+				_ = stopAndDisableQuiet(ctx, a.logger, systemd.PathsFor(item.Namespace, item.Name).UnitName)
+				obs = append(obs, observation)
+				managedNow[key] = carryManaged(a.managed[key], systemd.PathsFor(item.Namespace, item.Name).UnitName)
+				observation.ArtifactDownloadReason = downloadReason
+				observation.ArtifactDownloadMessage = downloadMessage
+				observation.ArtifactVerifyReason = verifyReason
+				observation.ArtifactVerifyMessage = verifyMessage
+				continue
+			}
+
+			resolvedCmd, err := resolveCommand(item.Spec.Execution.Command, result.rootfsPath)
+			if err != nil {
+				observation.ErrorMessage = stringPtr(err.Error())
+				observation.ProcessStarted = boolPtr(false)
+				observation.Healthy = boolPtr(false)
+				_ = stopAndDisableQuiet(ctx, a.logger, systemd.PathsFor(item.Namespace, item.Name).UnitName)
+				obs = append(obs, observation)
+				managedNow[key] = carryManaged(a.managed[key], systemd.PathsFor(item.Namespace, item.Name).UnitName)
+				observation.ArtifactDownloadReason = downloadReason
+				observation.ArtifactDownloadMessage = downloadMessage
+				observation.ArtifactVerifyReason = verifyReason
+				observation.ArtifactVerifyMessage = verifyMessage
+				continue
+			}
+			item.Spec.Execution.Command = resolvedCmd
+			observation.ArtifactDownloadReason = downloadReason
+			observation.ArtifactDownloadMessage = downloadMessage
+			observation.ArtifactVerifyReason = verifyReason
+			observation.ArtifactVerifyMessage = verifyMessage
 		}
 
 		paths := systemd.PathsFor(item.Namespace, item.Name)
@@ -472,6 +543,26 @@ func renderExecStart(cmd []string, args []string) (string, error) {
 		escaped = append(escaped, q)
 	}
 	return strings.Join(escaped, " "), nil
+}
+
+// resolveCommand makes a relative command absolute against the fetched rootfs.
+func resolveCommand(cmd []string, rootfs string) ([]string, error) {
+	if len(cmd) == 0 {
+		return nil, fmt.Errorf("missing command")
+	}
+	rootfs = strings.TrimSpace(rootfs)
+	if rootfs == "" {
+		return nil, fmt.Errorf("missing rootfs path")
+	}
+	if strings.HasPrefix(cmd[0], "/") {
+		return cmd, nil
+	}
+	clean := strings.TrimSpace(cmd[0])
+	if clean == "" {
+		return nil, fmt.Errorf("invalid command")
+	}
+	res := append([]string{filepath.Join(rootfs, clean)}, cmd[1:]...)
+	return res, nil
 }
 
 func escapeSystemdArg(arg string) (string, error) {
